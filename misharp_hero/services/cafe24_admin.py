@@ -41,7 +41,7 @@ class Cafe24AdminClient:
         url = f"{self.base}{path}"
         last_error = None
 
-        for attempt in range(4):
+        for attempt in range(5):
             try:
                 r = requests.get(
                     url,
@@ -67,7 +67,7 @@ class Cafe24AdminClient:
             except requests.RequestException as e:
                 last_error = e
 
-                if attempt < 3:
+                if attempt < 4:
                     time.sleep(1 + attempt * 2)
                     continue
 
@@ -80,64 +80,54 @@ class Cafe24AdminClient:
             "Cafe24 API 호출에 실패했습니다."
         )
 
-    def fetch_products(
+    def fetch_product_page(
         self,
+        since_product_no=0,
         limit=100,
-        max_products=5000,
     ):
-        rows = []
-        offset = 0
-
         limit = min(
             max(int(limit), 1),
             100,
         )
 
-        while offset < max_products:
-            data = self.get(
-                "/products",
-                {
-                    "limit": limit,
-                    "offset": offset,
-                },
-            )
+        data = self.get(
+            "/products",
+            {
+                "limit": limit,
+                "since_product_no": int(since_product_no),
+            },
+        )
 
-            part = (
-                data.get("products", [])
-                if isinstance(data, dict)
-                else []
-            )
+        if not isinstance(data, dict):
+            return []
 
-            rows.extend(part)
-
-            if len(part) < limit:
-                break
-
-            offset += limit
-
-        return rows
+        return data.get("products", []) or []
 
 
 def _num(v):
     try:
+        if v is None or v == "":
+            return None
+
         return float(
             str(v)
             .replace(",", "")
             .strip()
         )
+
     except Exception:
         return None
 
 
 def normalize_product(p):
+    product_no = p.get("product_no")
+
+    if product_no is not None:
+        product_no = str(product_no).strip()
+
     return {
-        "product_no": (
-            str(
-                p.get("product_no")
-                or ""
-            ).strip()
-            or None
-        ),
+        "product_no": product_no or None,
+
         "product_code": (
             str(
                 p.get("product_code")
@@ -145,23 +135,28 @@ def normalize_product(p):
             ).strip()
             or None
         ),
+
         "product_name": (
             p.get("product_name")
             or p.get("name")
             or ""
         ),
+
         "supplier_name": (
             p.get("supplier_name")
             or ""
         ),
+
         "category": (
             p.get("category_name")
             or ""
         ),
+
         "selling_price": _num(
             p.get("price")
             or p.get("selling_price")
         ),
+
         "stock_qty": int(
             _num(
                 p.get("stock_quantity")
@@ -169,6 +164,7 @@ def normalize_product(p):
             )
             or 0
         ),
+
         "image_url": (
             p.get("detail_image")
             or p.get("list_image")
@@ -312,20 +308,99 @@ def bulk_upsert_products(
 def sync_products():
     client = Cafe24AdminClient()
 
-    products = client.fetch_products(
-        limit=100,
-        max_products=5000,
-    )
+    total_saved = 0
+    since_product_no = 0
 
-    count = bulk_upsert_products(
-        products,
-        batch_size=500,
-    )
+    buffer = []
+    seen_last_numbers = set()
+
+    while True:
+        products = client.fetch_product_page(
+            since_product_no=since_product_no,
+            limit=100,
+        )
+
+        if not products:
+            break
+
+        buffer.extend(products)
+
+        product_numbers = []
+
+        for product in products:
+            try:
+                number = int(
+                    product.get("product_no")
+                )
+                product_numbers.append(number)
+            except Exception:
+                continue
+
+        if not product_numbers:
+            raise RuntimeError(
+                "Cafe24 상품번호를 확인할 수 없습니다."
+            )
+
+        next_since_product_no = max(
+            product_numbers
+        )
+
+        if (
+            next_since_product_no
+            <= since_product_no
+        ):
+            raise RuntimeError(
+                "Cafe24 상품 조회 위치가 진행되지 않습니다. "
+                f"현재 상품번호: {since_product_no}, "
+                f"다음 상품번호: {next_since_product_no}"
+            )
+
+        if (
+            next_since_product_no
+            in seen_last_numbers
+        ):
+            raise RuntimeError(
+                "Cafe24 상품 조회가 반복되고 있습니다. "
+                f"상품번호: {next_since_product_no}"
+            )
+
+        seen_last_numbers.add(
+            next_since_product_no
+        )
+
+        since_product_no = (
+            next_since_product_no
+        )
+
+        if len(buffer) >= 500:
+            total_saved += (
+                bulk_upsert_products(
+                    buffer,
+                    batch_size=500,
+                )
+            )
+
+            buffer = []
+
+        if len(products) < 100:
+            break
+
+        # Cafe24 API 호출이 너무 몰리지 않도록
+        # 아주 짧게 간격을 둡니다.
+        time.sleep(0.05)
+
+    if buffer:
+        total_saved += (
+            bulk_upsert_products(
+                buffer,
+                batch_size=500,
+            )
+        )
 
     log_sync(
         "Cafe24 Admin 상품",
         "성공",
-        f"{count}개",
+        f"{total_saved}개 전체 동기화",
     )
 
-    return count
+    return total_saved
