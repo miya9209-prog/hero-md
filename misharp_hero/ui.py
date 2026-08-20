@@ -15,7 +15,7 @@ from misharp_hero.hero_score import prelaunch_score
 from misharp_hero.services.md_excel_import import import_md_excel
 from misharp_hero.services.sera_import import import_sera_excel
 from misharp_hero.services.oauth import AdminOAuth, AnalyticsOAuth, load_token
-from misharp_hero.services.cafe24_admin import Cafe24AdminClient
+from misharp_hero.services.cafe24_admin import Cafe24AdminClient, sync_products
 from misharp_hero.config import (
     DATABASE_URL, CAFE24_MALL_ID, CAFE24_CLIENT_ID, CAFE24_REDIRECT_URI,
     CAFE24_ANALYTICS_AUTHORIZE_URL
@@ -473,4 +473,28 @@ def page_settings():
             except Exception as e:
                 st.error(
                     f"Cafe24 관리자 API 연결 실패: {e}"
+                )
+
+    st.divider()
+    st.subheader("Cafe24 상품 동기화")
+    st.caption(
+        "Cafe24의 상품번호, 상품코드, 상품명, 판매가, 재고 등 "
+        "기본 상품정보를 Supabase에 저장합니다."
+    )
+
+    if st.button("Cafe24 상품 동기화", type="primary"):
+        if not load_token("admin"):
+            st.warning("먼저 Cafe24 관리자 인증을 완료하세요.")
+        else:
+            try:
+                with st.spinner("Cafe24 상품을 가져오는 중입니다..."):
+                    count = sync_products()
+
+                st.success(
+                    f"Cafe24 상품 동기화 완료 · {count:,}개 상품 저장"
+                )
+
+            except Exception as e:
+                st.error(
+                    f"Cafe24 상품 동기화 실패: {e}"
                 )
