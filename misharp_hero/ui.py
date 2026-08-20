@@ -14,6 +14,7 @@ from misharp_hero.hero_score import prelaunch_score
 from misharp_hero.services.md_excel_import import import_md_excel
 from misharp_hero.services.sera_import import import_sera_excel
 from misharp_hero.services.oauth import AdminOAuth, AnalyticsOAuth, load_token
+from misharp_hero.services.cafe24_admin import Cafe24AdminClient
 from misharp_hero.config import (
     DATABASE_URL, CAFE24_MALL_ID, CAFE24_CLIENT_ID, CAFE24_REDIRECT_URI,
     CAFE24_ANALYTICS_AUTHORIZE_URL
@@ -254,13 +255,42 @@ def page_settings():
         st.info("Analytics 전용 앱을 사용하지 않는 경우 비워둘 수 있습니다. 별도 앱이 필요하면 Setup Guide의 Analytics 절차를 따라 URL과 Client 정보를 입력하세요.")
 
     st.divider()
-    st.subheader("연결 테스트")
+     st.subheader("연결 테스트")
+
     if st.button("설정 진단"):
         issues = []
-        if not DATABASE_URL: issues.append("DATABASE_URL")
-        if not CAFE24_MALL_ID: issues.append("CAFE24_MALL_ID")
-        if not CAFE24_CLIENT_ID: issues.append("CAFE24_CLIENT_ID")
+
+        if not DATABASE_URL:
+            issues.append("DATABASE_URL")
+
+        if not CAFE24_MALL_ID:
+            issues.append("CAFE24_MALL_ID")
+
+        if not CAFE24_CLIENT_ID:
+            issues.append("CAFE24_CLIENT_ID")
+
         if issues:
             st.warning("미설정: " + ", ".join(issues))
+
+        elif not load_token("admin"):
+            st.warning("Cafe24 관리자 토큰이 없습니다.")
+
         else:
-            st.success("기본 설정값이 있습니다. 실제 API 호출은 scripts.sync_cafe24로 확인하세요.")
+            try:
+                client = Cafe24AdminClient()
+                result = client.get(
+                    "/products",
+                    {"limit": 1}
+                )
+
+                products = result.get("products", [])
+
+                st.success(
+                    f"Cafe24 관리자 API 연결 정상 · "
+                    f"상품 조회 응답 {len(products)}개 확인"
+                )
+
+            except Exception as e:
+                st.error(
+                    f"Cafe24 관리자 API 연결 실패: {e}"
+                )
