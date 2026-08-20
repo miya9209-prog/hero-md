@@ -100,7 +100,14 @@ class AnalyticsOAuth:
             },
             timeout=30,
         )
-        r.raise_for_status()
+        if not r.ok:
+    try:
+        detail = r.json()
+    except Exception:
+        detail = r.text
+    raise RuntimeError(
+        f"Cafe24 토큰 발급 실패 ({r.status_code}): {detail}"
+    )
         token = r.json()
         save_token("analytics", token)
         return token
