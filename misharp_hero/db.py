@@ -38,4 +38,10 @@ def session_scope():
         s.close()
 
 def init_db():
-    Base.metadata.create_all(get_engine())
+    engine = get_engine()
+    try:
+        Base.metadata.create_all(engine, checkfirst=True)
+    except Exception as e:
+        if DATABASE_URL.startswith("sqlite") and "already exists" in str(e).lower():
+            return
+        raise
