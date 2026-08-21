@@ -30,10 +30,32 @@ class Product(Base):
     category: Mapped[str | None] = mapped_column(String(200), nullable=True)
     supply_price: Mapped[float | None] = mapped_column(Float, nullable=True)
     selling_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    retail_price: Mapped[float | None] = mapped_column(Float, nullable=True)
+    display: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    selling: Mapped[str | None] = mapped_column(String(20), nullable=True, index=True)
+    cafe24_created_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    cafe24_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # legacy 컬럼. HERO ITEM OS의 실제 재고는 절대 이 값을 사용하지 않는다.
     # 실제 재고는 inventory_current(Sellmate) 기준.
     stock_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class ProductMD(Base):
+    """MD가 직접 관리하는 상품 운영정보. Cafe24 재동기화와 분리한다."""
+    __tablename__ = "product_md"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    product_no: Mapped[str] = mapped_column(String(50), unique=True, index=True)
+    hero_watch: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    launch_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    sale_end_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    season: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    sourcing_type: Mapped[str | None] = mapped_column(String(50), nullable=True, index=True)
+    md_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    md_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    launch_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -245,5 +267,6 @@ class SyncLog(Base):
 
 
 Index("ix_launch_status_window", Launch.close_48h_at, Launch.product_no)
+Index("ix_product_md_watch_launch", ProductMD.hero_watch, ProductMD.launch_at)
 Index("ix_analytics_product_date", AnalyticsProductMetric.product_no, AnalyticsProductMetric.metric_date)
 Index("ix_inventory_product_capture", InventoryCurrent.product_no, InventoryCurrent.captured_at)
