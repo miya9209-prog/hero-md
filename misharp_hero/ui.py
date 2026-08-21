@@ -410,7 +410,18 @@ def page_product_master():
                 },
             )
             if hero_watch:
-                st.success(f"저장 완료 · 48H 관찰 연결 #{result.get('launch_id')}")
+                # 신규 HERO 관찰상품은 저장 직후 첫 Analytics 데이터를 즉시 수집합니다.
+                # 이후 갱신은 GitHub Actions가 30분 간격으로 이어서 수행합니다.
+                try:
+                    with st.spinner("첫 판매반응 데이터를 불러오는 중입니다..."):
+                        immediate_count = sync_launch_metrics(product_no=selected_no)
+                    if immediate_count:
+                        st.toast("HERO 관찰 등록 · 첫 데이터까지 바로 갱신했습니다.", icon="✅")
+                    else:
+                        st.toast("HERO 관찰 등록 완료 · 출시 전 상품은 출시 후 자동 수집됩니다.", icon="✅")
+                except Exception as e:
+                    # 운영정보 저장 자체는 성공 상태로 유지하고, 수집 실패만 안내합니다.
+                    st.warning(f"HERO 관찰 등록은 완료됐지만 첫 데이터 수집은 잠시 후 자동 재시도됩니다. ({e})")
             else:
                 st.success("저장 완료 · HERO 관찰 OFF")
             st.rerun()
