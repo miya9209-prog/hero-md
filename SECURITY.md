@@ -1,9 +1,7 @@
-# 보안 운영 규칙
+# Security
 
-1. Client Secret, Access Token, Refresh Token, DB 비밀번호를 GitHub 코드에 직접 쓰지 않습니다.
-2. `.env`와 `.streamlit/secrets.toml`은 커밋하지 않습니다.
-3. 운영 DB는 외부에 공개하지 않습니다.
-4. TOKEN_ENCRYPTION_KEY는 별도 안전한 장소에도 백업합니다.
-5. GitHub Actions와 Streamlit의 Secret은 필요 최소권한으로 운영합니다.
-6. Cafe24 앱 권한은 읽기권한 중심으로 시작합니다.
-7. 토큰/비밀번호가 노출된 경우 즉시 폐기·재발급합니다.
+- Client Secret, Supabase DB password, Sellmate API Token, OAuth code를 GitHub에 커밋하지 않습니다.
+- Streamlit Secrets / GitHub Actions Secrets만 사용합니다.
+- OAuth access/refresh token은 `TOKEN_ENCRYPTION_KEY`로 암호화해 DB에 저장합니다.
+- 오류 화면에 Secret 전체를 출력하지 않습니다.
+- 사용자가 스크린샷을 공유할 때 Secret/API Token/DB URL을 가립니다.

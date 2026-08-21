@@ -1,17 +1,20 @@
-from misharp_hero.hero_score import prelaunch_score, hero_grade, diagnose
+from misharp_hero.hero_score import postlaunch_score, hero_grade, diagnose
 
-def test_prelaunch_score_range():
-    s = prelaunch_score(
-        focus=True, dna_score=90, margin_rate=40,
-        season_score=90, reorder_score=80, content_score=85, md_score=90
-    )
-    assert 0 <= s <= 100
-    assert s > 70
 
-def test_grade():
-    assert "HERO" in hero_grade(90)
-    assert hero_grade(50) == "재검토"
+def test_high_signal_score():
+    row = {
+        "views": 2500,
+        "cvr": 0.05,
+        "rpv": 2600,
+        "cart_rate": 0.09,
+        "qty": 70,
+        "revenue": 3_000_000,
+        "sera_click_value": 80,
+    }
+    score = postlaunch_score(row)
+    assert score >= 70
+    assert hero_grade(score) in {"🔥 HERO", "💎 HERO 유력"}
 
-def test_diagnose_fallback():
-    assert diagnose(2000, 0.04) == "HERO"
-    assert "숨은" in diagnose(200, 0.04)
+
+def test_hidden_hero():
+    assert "숨은 HERO" in diagnose(300, 0.04)

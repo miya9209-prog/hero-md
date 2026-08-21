@@ -1,24 +1,28 @@
 from __future__ import annotations
+
+import json
 import time
-from datetime import datetime
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
 import requests
-from misharp_hero.config import CAFE24_MALL_ID
-from misharp_hero.services.oauth import valid_access_token, load_token
+
+from misharp_hero.config import CAFE24_MALL_ID, CAFE24_SHOP_NO
+from misharp_hero.repository import upsert_analytics_daily, log_sync
+from misharp_hero.services.oauth import valid_access_token
+
 
 class Cafe24AnalyticsClient:
     BASE = "https://ca-api.cafe24data.com"
 
-    def __init__(self, throttle_seconds=1.55):
+    def __init__(self, throttle_seconds=0.55):
         self.throttle_seconds = throttle_seconds
         self._last = 0.0
 
     def _token(self):
-        # Cafe24 Analytics API는 Analytics 앱의 별도 OAuth 인증을 사용합니다.
-        if not load_token("analytics"):
-            raise RuntimeError("Cafe24 Analytics 전용 OAuth 토큰이 없습니다. 설정·연동에서 Analytics 인증을 먼저 완료하세요.")
-        token = valid_access_token("analytics")
+        token = valid_access_token("admin")
         if not token:
-            raise RuntimeError("Cafe24 Analytics OAuth 토큰을 갱신할 수 없습니다.")
+            raise RuntimeError("Cafe24 OAuth 토큰이 없습니다.")
         return token
 
     def _wait(self):
@@ -32,19 +36,18 @@ class Cafe24AnalyticsClient:
             f"{self.BASE}{path}",
             headers={"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"},
             params=params,
-            timeout=40,
+            timeout=45,
         )
         self._last = time.time()
         if r.status_code == 429:
             time.sleep(3)
-            r = requests.get(
-                f"{self.BASE}{path}",
-                headers={"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"},
-                params=params,
-                timeout=40,
-            )
-            self._last = time.time()
-        r.raise_for_status()
+            return self.get(path, params)
+        if not r.ok:
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text
+            raise RuntimeError(f"Cafe24 Analytics 실패 {r.status_code}: {detail}")
         return r.json()
 
     @staticmethod
@@ -53,7 +56,16 @@ class Cafe24AnalyticsClient:
             return payload
         if not isinstance(payload, dict):
             return []
-        for k, v in payload.items():
+        # API 응답 버전에 따라 최상단 또는 resource 내부 리스트를 모두 대응
+        for key in ("resource", "products", "carts", "data"):
+            v = payload.get(key)
+            if isinstance(v, list):
+                return v
+            if isinstance(v, dict):
+                for vv in v.values():
+                    if isinstance(vv, list):
+                        return vv
+        for v in payload.values():
             if isinstance(v, list):
                 return v
             if isinstance(v, dict):
@@ -62,48 +74,143 @@ class Cafe24AnalyticsClient:
                         return vv
         return []
 
-    def product_view(self, start_at: datetime, end_at: datetime):
-        params = {
+    def paginate(self, path, params, limit=1000):
+        rows = []
+        offset = 0
+        limit = min(max(int(limit), 50), 1000)
+        while True:
+            p = dict(params)
+            p.update({"limit": limit, "offset": offset})
+            part = self._rows(self.get(path, p))
+            rows.extend(part)
+            if len(part) < limit:
+                break
+            offset += limit
+        return rows
+
+    def _base_params(self, start_at: datetime, end_at: datetime):
+        return {
             "mall_id": CAFE24_MALL_ID,
-            "shop_no": 1,
+            "shop_no": CAFE24_SHOP_NO,
             "start_date": start_at.strftime("%Y-%m-%d"),
             "end_date": end_at.strftime("%Y-%m-%d"),
             "start_datetime": start_at.strftime("%Y-%m-%dT%H:%M:%S"),
             "end_datetime": end_at.strftime("%Y-%m-%dT%H:%M:%S"),
             "timezone": "Asia/Seoul",
-            "limit": 1000,
-            "offset": 0,
         }
-        return self._rows(self.get("/products/view", params))
+
+    def product_views(self, start_at: datetime, end_at: datetime):
+        return self.paginate("/products/view", self._base_params(start_at, end_at))
 
     def product_sales(self, start_at: datetime, end_at: datetime):
-        params = {
-            "mall_id": CAFE24_MALL_ID,
-            "shop_no": 1,
-            "start_date": start_at.strftime("%Y-%m-%d"),
-            "end_date": end_at.strftime("%Y-%m-%d"),
-            "start_datetime": start_at.strftime("%Y-%m-%dT%H:%M:%S"),
-            "end_datetime": end_at.strftime("%Y-%m-%dT%H:%M:%S"),
-            "timezone": "Asia/Seoul",
-            "limit": 1000,
-            "offset": 0,
-        }
-        return self._rows(self.get("/products/sales", params))
+        return self.paginate("/products/sales", self._base_params(start_at, end_at))
 
-def merge_product_metric(product_no, views_rows, sales_rows):
-    key = str(product_no or "").strip()
-    v = next((x for x in views_rows if str(x.get("product_no") or "").strip() == key), {})
-    s = next((x for x in sales_rows if str(x.get("product_no") or "").strip() == key), {})
-    views = int(float(v.get("count") or v.get("view_count") or 0))
-    orders = int(float(s.get("order_count") or 0))
-    qty = int(float(s.get("order_product_count") or s.get("qty") or 0))
-    revenue = float(s.get("order_amount") or 0)
-    return {
-        "views": views,
-        "order_count": orders,
-        "qty": qty,
-        "revenue": revenue,
-        "cvr": orders / views if views else 0,
-        "qty_cvr": qty / views if views else 0,
-        "rpv": revenue / views if views else 0,
-    }
+    def carts_action(self, start_at: datetime, end_at: datetime):
+        return self.paginate("/carts/action", self._base_params(start_at, end_at))
+
+    def merged_product_metrics(self, start_at: datetime, end_at: datetime):
+        views = self.product_views(start_at, end_at)
+        sales = self.product_sales(start_at, end_at)
+        carts = self.carts_action(start_at, end_at)
+        return merge_metric_rows(views, sales, carts)
+
+
+def _int(v):
+    try:
+        return int(float(v or 0))
+    except Exception:
+        return 0
+
+
+def _float(v):
+    try:
+        return float(v or 0)
+    except Exception:
+        return 0.0
+
+
+def merge_metric_rows(views_rows, sales_rows, cart_rows):
+    merged = {}
+
+    def item(no):
+        no = str(no or "").strip()
+        if not no:
+            return None
+        return merged.setdefault(
+            no,
+            {
+                "product_no": no,
+                "product_name": "",
+                "views": 0,
+                "cart_count": 0,
+                "cart_rate": 0.0,
+                "order_count": 0,
+                "qty": 0,
+                "revenue": 0.0,
+            },
+        )
+
+    for r in views_rows:
+        x = item(r.get("product_no"))
+        if x:
+            x["product_name"] = r.get("product_name") or x["product_name"]
+            x["views"] = _int(r.get("count") or r.get("view_count"))
+
+    for r in sales_rows:
+        x = item(r.get("product_no"))
+        if x:
+            x["product_name"] = r.get("product_name") or x["product_name"]
+            x["order_count"] = _int(r.get("order_count"))
+            x["qty"] = _int(r.get("order_product_count") or r.get("qty"))
+            x["revenue"] = _float(r.get("order_amount"))
+
+    for r in cart_rows:
+        x = item(r.get("product_no"))
+        if x:
+            x["product_name"] = r.get("product_name") or x["product_name"]
+            x["cart_count"] = _int(r.get("add_cart_count"))
+            raw_rate = _float(r.get("add_cart_rate"))
+            x["cart_rate"] = raw_rate / 100 if raw_rate > 1 else raw_rate
+
+    # API 장바구니율이 비어 있으면 조회수 기준 계산
+    for x in merged.values():
+        if not x["cart_rate"] and x["views"]:
+            x["cart_rate"] = x["cart_count"] / x["views"]
+    return list(merged.values())
+
+
+def sync_analytics_day(target_date: date):
+    start_at = datetime.combine(target_date, datetime.min.time())
+    end_at = datetime.combine(target_date, datetime.max.time()).replace(microsecond=0)
+    client = Cafe24AnalyticsClient()
+    rows = client.merged_product_metrics(start_at, end_at)
+    payload = []
+    now = datetime.utcnow()
+    for r in rows:
+        payload.append(
+            {
+                "metric_date": target_date.isoformat(),
+                "product_no": str(r["product_no"]),
+                "product_name": r.get("product_name") or "",
+                "views": r.get("views", 0),
+                "cart_count": r.get("cart_count", 0),
+                "cart_rate": r.get("cart_rate", 0),
+                "order_count": r.get("order_count", 0),
+                "qty": r.get("qty", 0),
+                "revenue": r.get("revenue", 0),
+                "raw_json": json.dumps(r, ensure_ascii=False),
+                "collected_at": now,
+            }
+        )
+    count = upsert_analytics_daily(payload)
+    log_sync("Cafe24 Analytics", "성공", f"{target_date.isoformat()} {count}개 상품")
+    return count
+
+
+def sync_analytics_days(days=2, include_today=True):
+    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    total = 0
+    start_offset = 0 if include_today else 1
+    for n in range(start_offset, start_offset + int(days)):
+        total += sync_analytics_day(today - timedelta(days=n))
+    return total

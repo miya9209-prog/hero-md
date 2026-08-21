@@ -1,9 +1,13 @@
 from __future__ import annotations
-import json, re
+
+import json
+import re
 from pathlib import Path
 from datetime import datetime
+
 import pandas as pd
-from misharp_hero.repository import save_sera_rows
+
+from misharp_hero.repository import save_sera_rows, log_sync
 
 ALIASES = {
     "product_no": ["상품번호", "product_no", "상품 no", "상품no", "상품 번호"],
@@ -19,8 +23,10 @@ ALIASES = {
     "click_value": ["클릭가치", "click_value", "클릭 가치"],
 }
 
+
 def _norm(s):
     return re.sub(r"\s+", "", str(s or "")).lower()
+
 
 def _find_col(columns, aliases):
     normmap = {_norm(c): c for c in columns}
@@ -35,6 +41,7 @@ def _find_col(columns, aliases):
                 return c
     return None
 
+
 def _num(v, integer=False):
     try:
         if pd.isna(v):
@@ -43,6 +50,7 @@ def _num(v, integer=False):
         return int(x) if integer else x
     except Exception:
         return None
+
 
 def extract_product_no(value):
     text = str(value or "")
@@ -58,6 +66,21 @@ def extract_product_no(value):
             return m.group(1)
     return None
 
+
+def infer_report_date(filename):
+    text = Path(filename).stem
+    patterns = [
+        r"(20\d{2})[-_.]?(\d{2})[-_.]?(\d{2})",
+        r"(\d{4})(\d{2})(\d{2})",
+    ]
+    for p in patterns:
+        m = re.search(p, text)
+        if m:
+            y, mo, d = m.groups()
+            return f"{y}-{mo}-{d}"
+    return None
+
+
 def detect_header_row(path, sheet_name=0, max_rows=20):
     raw = pd.read_excel(path, sheet_name=sheet_name, header=None, nrows=max_rows)
     keywords = ["상품", "조회", "주문", "매출", "OpV", "ESpV"]
@@ -69,22 +92,23 @@ def detect_header_row(path, sheet_name=0, max_rows=20):
             best_score, best_row = score, i
     return int(best_row)
 
+
 def parse_sera_excel(path):
     path = Path(path)
     xls = pd.ExcelFile(path)
     rows = []
+    report_date = infer_report_date(path.name)
 
     for sheet in xls.sheet_names:
         header = detect_header_row(path, sheet)
-        df = pd.read_excel(path, sheet_name=sheet, header=header)
-        if df.empty:
+        data = pd.read_excel(path, sheet_name=sheet, header=header)
+        if data.empty:
             continue
-
-        cols = {k: _find_col(df.columns, aliases) for k, aliases in ALIASES.items()}
+        cols = {k: _find_col(data.columns, aliases) for k, aliases in ALIASES.items()}
         if not (cols["product_name"] or cols["product_no"] or cols["detail_path"]):
             continue
 
-        for _, r in df.iterrows():
+        for _, r in data.iterrows():
             name = str(r.get(cols["product_name"], "") if cols["product_name"] else "").strip()
             no = str(r.get(cols["product_no"], "") if cols["product_no"] else "").strip()
             if no.lower() in ("nan", "none", ""):
@@ -103,24 +127,28 @@ def parse_sera_excel(path):
                 else:
                     raw_dict[str(k)] = v
 
-            rows.append({
-                "report_name": path.name,
-                "report_date": None,
-                "product_no": no or None,
-                "product_code": str(r.get(cols["product_code"], "")).strip() if cols["product_code"] else None,
-                "product_name": name,
-                "views": _num(r.get(cols["views"])) if cols["views"] else None,
-                "orders": _num(r.get(cols["orders"]), True) if cols["orders"] else None,
-                "qty": _num(r.get(cols["qty"]), True) if cols["qty"] else None,
-                "revenue": _num(r.get(cols["revenue"])) if cols["revenue"] else None,
-                "opv": _num(r.get(cols["opv"])) if cols["opv"] else None,
-                "espv": _num(r.get(cols["espv"])) if cols["espv"] else None,
-                "click_value": _num(r.get(cols["click_value"])) if cols["click_value"] else None,
-                "raw_json": json.dumps(raw_dict, ensure_ascii=False, default=str),
-            })
+            rows.append(
+                {
+                    "report_name": path.name,
+                    "report_date": report_date,
+                    "product_no": no or None,
+                    "product_code": str(r.get(cols["product_code"], "")).strip() if cols["product_code"] else None,
+                    "product_name": name,
+                    "views": _num(r.get(cols["views"])) if cols["views"] else None,
+                    "orders": _num(r.get(cols["orders"]), True) if cols["orders"] else None,
+                    "qty": _num(r.get(cols["qty"]), True) if cols["qty"] else None,
+                    "revenue": _num(r.get(cols["revenue"])) if cols["revenue"] else None,
+                    "opv": _num(r.get(cols["opv"])) if cols["opv"] else None,
+                    "espv": _num(r.get(cols["espv"])) if cols["espv"] else None,
+                    "click_value": _num(r.get(cols["click_value"])) if cols["click_value"] else None,
+                    "raw_json": json.dumps(raw_dict, ensure_ascii=False, default=str),
+                }
+            )
     return rows
+
 
 def import_sera_excel(path):
     rows = parse_sera_excel(path)
-    save_sera_rows(rows)
-    return len(rows)
+    count = save_sera_rows(rows)
+    log_sync("SERA", "성공", f"{Path(path).name} {count}행")
+    return count

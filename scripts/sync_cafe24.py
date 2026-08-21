@@ -1,19 +1,30 @@
+from __future__ import annotations
 import argparse
+
 from misharp_hero.db import init_db
-from misharp_hero.services.cafe24_admin import sync_products
+from misharp_hero.services.cafe24_admin import sync_products_full, sync_products_incremental
+from misharp_hero.services.cafe24_analytics import sync_analytics_days
 from misharp_hero.services.sync import sync_launch_metrics
 
-if __name__ == "__main__":
+
+def main():
     p = argparse.ArgumentParser()
-    p.add_argument("--products", action="store_true")
-    p.add_argument("--launches", action="store_true")
+    p.add_argument("--products", action="store_true", help="Cafe24 상품 전체 동기화")
+    p.add_argument("--products-incremental", action="store_true", help="최근 48H 수정상품")
+    p.add_argument("--analytics", action="store_true", help="Analytics 최근 N일")
+    p.add_argument("--analytics-days", type=int, default=2)
+    p.add_argument("--launches", action="store_true", help="48H HERO 갱신")
     args = p.parse_args()
     init_db()
-
-    if not args.products and not args.launches:
-        args.launches = True
-
     if args.products:
-        print("상품 동기화:", sync_products())
+        print("products:", sync_products_full())
+    if args.products_incremental:
+        print("products_incremental:", sync_products_incremental(48))
+    if args.analytics:
+        print("analytics:", sync_analytics_days(args.analytics_days))
     if args.launches:
-        print("48H 동기화:", sync_launch_metrics())
+        print("hero:", sync_launch_metrics())
+
+
+if __name__ == "__main__":
+    main()
