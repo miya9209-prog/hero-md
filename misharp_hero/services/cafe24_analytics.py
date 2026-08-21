@@ -31,24 +31,45 @@ class Cafe24AnalyticsClient:
             time.sleep(self.throttle_seconds - elapsed)
 
     def get(self, path, params):
-        self._wait()
-        r = requests.get(
-            f"{self.BASE}{path}",
-            headers={"Authorization": f"Bearer {self._token()}", "Content-Type": "application/json"},
-            params=params,
-            timeout=45,
-        )
-        self._last = time.time()
-        if r.status_code == 429:
-            time.sleep(3)
-            return self.get(path, params)
-        if not r.ok:
+        """GET with automatic token refresh on HTTP 401.
+
+        A stored expiry timestamp is only a hint. Cafe24 can invalidate an
+        access token earlier, so one forced refresh+retry is the authoritative
+        recovery path.
+        """
+        url = f"{self.BASE}{path}"
+        token = self._token()
+
+        for auth_attempt in range(2):
+            self._wait()
+            r = requests.get(
+                url,
+                headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
+                params=params,
+                timeout=45,
+            )
+            self._last = time.time()
+
+            if r.status_code == 401 and auth_attempt == 0:
+                token = valid_access_token("admin", force_refresh=True)
+                if not token:
+                    break
+                continue
+
+            if r.status_code == 429:
+                time.sleep(3)
+                continue
+
+            if r.ok:
+                return r.json()
+
             try:
                 detail = r.json()
             except Exception:
                 detail = r.text
             raise RuntimeError(f"Cafe24 Analytics 실패 {r.status_code}: {detail}")
-        return r.json()
+
+        raise RuntimeError("Cafe24 Analytics 인증 갱신에 실패했습니다. 데이터·설정에서 Cafe24 권한을 다시 승인해주세요.")
 
     @staticmethod
     def _rows(payload):
