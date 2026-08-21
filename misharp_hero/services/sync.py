@@ -29,8 +29,16 @@ def _map_by_no(data):
     return {str(r["product_no"]): r.to_dict() for _, r in data.iterrows()}
 
 
-def sync_launch_metrics(include_future_close=False):
+def sync_launch_metrics(include_future_close=False, product_no: str | None = None):
+    """HERO 관찰상품의 Cafe24 Analytics를 갱신합니다.
+
+    product_no가 주어지면 해당 상품만 즉시 갱신합니다.
+    예약 실행에서는 product_no를 생략해 전체 관찰상품을 갱신합니다.
+    """
     launches = current_launches(only_observed=True)
+    if product_no is not None and not launches.empty:
+        target_no = str(product_no).strip()
+        launches = launches[launches["product_no"].astype(str) == target_no].copy()
     if launches.empty:
         return 0
 
