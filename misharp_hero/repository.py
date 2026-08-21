@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import datetime
 import json
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
@@ -24,7 +24,7 @@ from misharp_hero.models import (
 
 
 def df(sql, params=None):
-    return pd.read_sql(sql, get_engine(), params=params or {})
+    return pd.read_sql(text(sql), get_engine(), params=params or {})
 
 
 def upsert_product(data: dict):
