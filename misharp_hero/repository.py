@@ -572,6 +572,20 @@ def current_launches(only_observed: bool = False):
 
 
 
+def update_return_metric(launch_id: int, return_order_count: int, return_qty: int, return_rate, collected_at=None):
+    """HERO 48H metric의 사후 반품지표만 안전하게 갱신한다."""
+    with session_scope() as s:
+        obj = s.scalar(select(HeroMetricV2).where(HeroMetricV2.launch_id == int(launch_id)))
+        if obj is None:
+            return False
+        obj.return_order_count = int(return_order_count or 0)
+        obj.return_qty = int(return_qty or 0)
+        obj.return_rate = float(return_rate) if return_rate is not None else None
+        obj.return_collected_at = collected_at or datetime.utcnow()
+        s.flush()
+        return True
+
+
 def save_post48h_followup(launch_id: int, decision: str, note: str = ""):
     """48H 완료 이후 MD 판단 저장. 관찰종료는 레이더에서만 제외하고 기록은 보존한다."""
     allowed = {"확대", "유지관찰", "보완", "중단", "관찰종료"}
