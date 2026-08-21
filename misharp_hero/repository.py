@@ -24,7 +24,18 @@ from misharp_hero.models import (
 
 
 def df(sql, params=None):
-    return pd.read_sql(text(sql), get_engine(), params=params or {})
+    with get_engine().connect() as conn:
+        result = conn.execute(
+            text(sql),
+            params or {},
+        )
+
+        rows = result.mappings().all()
+
+        return pd.DataFrame(
+            rows,
+            columns=list(result.keys()),
+        )
 
 
 def upsert_product(data: dict):
