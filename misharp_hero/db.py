@@ -1,7 +1,7 @@
 from __future__ import annotations
 from contextlib import contextmanager
 
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.orm import sessionmaker
 
 from misharp_hero.config import DATABASE_URL
@@ -44,6 +44,31 @@ def session_scope():
         s.close()
 
 
+def _ensure_product_columns(engine):
+    """create_all이 기존 products 테이블 컬럼을 추가하지 못하므로 최소 마이그레이션을 수행한다."""
+    inspector = inspect(engine)
+    if "products" not in inspector.get_table_names():
+        return
+
+    existing = {c["name"] for c in inspector.get_columns("products")}
+    dialect = engine.dialect.name
+    ts_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
+    wanted = {
+        "retail_price": "FLOAT",
+        "display": "VARCHAR(20)",
+        "selling": "VARCHAR(20)",
+        "cafe24_created_at": ts_type,
+        "cafe24_updated_at": ts_type,
+    }
+    missing = [(name, coltype) for name, coltype in wanted.items() if name not in existing]
+    if not missing:
+        return
+
+    with engine.begin() as conn:
+        for name, coltype in missing:
+            conn.execute(text(f"ALTER TABLE products ADD COLUMN {name} {coltype}"))
+
+
 def init_db():
     """동시 Streamlit 실행에서 DDL 충돌이 나지 않도록 PostgreSQL advisory lock 사용."""
     engine = get_engine()
@@ -52,10 +77,12 @@ def init_db():
         with engine.begin() as conn:
             conn.execute(text("SELECT pg_advisory_xact_lock(20260821)"))
             Base.metadata.create_all(bind=conn, checkfirst=True)
+        _ensure_product_columns(engine)
         return
 
     try:
         Base.metadata.create_all(engine, checkfirst=True)
+        _ensure_product_columns(engine)
     except Exception as e:
         if DATABASE_URL.startswith("sqlite") and "already exists" in str(e).lower():
             return
