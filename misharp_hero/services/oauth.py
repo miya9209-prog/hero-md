@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 from datetime import datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from urllib.parse import urlencode
 
 import requests
@@ -87,19 +88,45 @@ class AdminOAuth:
         return token
 
 
+def _token_expiry(token):
+    """Return a conservative UTC-naive expiry timestamp.
+
+    Cafe24 may return both expires_in and expires_at. expires_in is preferred
+    because it is timezone-independent. A safety margin is subtracted so that
+    API calls never intentionally use a token near expiry.
+    """
+    now_utc = datetime.now(timezone.utc)
+
+    raw_expires_in = token.get("expires_in")
+    if raw_expires_in not in (None, ""):
+        try:
+            seconds = int(float(raw_expires_in))
+            return (now_utc + timedelta(seconds=max(60, seconds - 180))).replace(tzinfo=None)
+        except Exception:
+            pass
+
+    raw_expires_at = token.get("expires_at")
+    if raw_expires_at:
+        try:
+            parsed = datetime.fromisoformat(str(raw_expires_at).replace("Z", "+00:00"))
+            # Cafe24 responses can contain a timezone-less local timestamp.
+            # Treat it as Korea time for this mall, then normalize to UTC.
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=ZoneInfo("Asia/Seoul"))
+            parsed = parsed.astimezone(timezone.utc) - timedelta(minutes=3)
+            return parsed.replace(tzinfo=None)
+        except Exception:
+            pass
+
+    # Conservative fallback. A 90-minute local lifetime guarantees a refresh
+    # well before a typical two-hour token expiry.
+    return (now_utc + timedelta(minutes=90)).replace(tzinfo=None)
+
+
 def save_token(provider, token):
     access = token.get("access_token")
     refresh = token.get("refresh_token")
-    if token.get("expires_at"):
-        try:
-            expires_at = datetime.fromisoformat(str(token["expires_at"]).replace("Z", "+00:00"))
-            if expires_at.tzinfo is not None:
-                expires_at = expires_at.astimezone(timezone.utc).replace(tzinfo=None)
-        except Exception:
-            expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=7000)
-    else:
-        expires_in = int(token.get("expires_in") or 7200)
-        expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=max(60, expires_in - 120))
+    expires_at = _token_expiry(token)
 
     with session_scope() as s:
         obj = s.scalar(select(OAuthToken).where(OAuthToken.provider == provider))
@@ -107,6 +134,8 @@ def save_token(provider, token):
             obj = OAuthToken(provider=provider)
             s.add(obj)
         obj.access_token_enc = encrypt_text(access) if access else obj.access_token_enc
+        # Cafe24 may rotate the refresh token. Keep the old one only when the
+        # response truly omits a new value.
         obj.refresh_token_enc = encrypt_text(refresh) if refresh else obj.refresh_token_enc
         obj.expires_at = expires_at
 
@@ -123,14 +152,30 @@ def load_token(provider="admin"):
         }
 
 
-def valid_access_token(provider="admin"):
+def valid_access_token(provider="admin", force_refresh=False):
+    """Return a usable access token, refreshing automatically when needed.
+
+    force_refresh=True is used after an API returns HTTP 401. This protects
+    against clock/timezone differences or server-side early invalidation.
+    """
     token = load_token(provider)
     if not token:
         return None
-    if token["expires_at"] and token["expires_at"] > datetime.now(timezone.utc).replace(tzinfo=None):
-        return token["access_token"]
+
     refresh = token.get("refresh_token")
-    if not refresh:
-        return token.get("access_token")
-    new = AdminOAuth().refresh(refresh)
-    return new.get("access_token")
+    if force_refresh:
+        if not refresh:
+            return token.get("access_token")
+        new = AdminOAuth().refresh(refresh)
+        return new.get("access_token")
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    expires_at = token.get("expires_at")
+    if token.get("access_token") and expires_at and expires_at > now + timedelta(seconds=30):
+        return token["access_token"]
+
+    if refresh:
+        new = AdminOAuth().refresh(refresh)
+        return new.get("access_token")
+
+    return token.get("access_token")
