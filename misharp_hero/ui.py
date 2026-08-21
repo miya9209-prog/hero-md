@@ -29,6 +29,8 @@ from misharp_hero.repository import (
     product_master_filter_values,
     product_master_page,
     save_product_md,
+    save_post48h_followup,
+    ended_followups,
     sync_status_df,
     df,
 )
@@ -85,8 +87,8 @@ def _hero_os_guide():
             <div class="mso-guide-step"><b>1. 신상품 등록</b><br>상품 마스터에서 상품을 검색한 뒤 시즌, 제작/사입, 실제 출시일시를 입력하고 <b>HERO 관찰 ON</b>으로 저장합니다.</div>
             <div class="mso-guide-step"><b>2. 48시간 자동관찰</b><br>Cafe24 Analytics 기준 상품조회수, 장바구니, 판매건수, 판매수량, 매출, 구매전환율(CVR), 조회당 매출(RPV)을 추적합니다.</div>
             <div class="mso-guide-step"><b>3. 48시간 판정</b><br>히로 점수(HERO Score)와 자동진단을 참고해 확대, 유지관찰, 보완, 중단 여부를 판단합니다.</div>
-            <div class="mso-guide-step"><b>4. 48시간 이후 사후관찰</b><br>48시간이 끝나도 HERO 관찰을 끄지 않으면 레이더에 계속 남습니다. 향후 반품률이 연결되면 판매량뿐 아니라 판매 품질까지 함께 확인합니다.</div>
-            <div class="mso-guide-step"><b>5. 관찰 종료</b><br>판단이 끝난 상품은 상품 마스터에서 HERO 관찰을 OFF로 바꿉니다. 상품 및 과거 판정 기록은 DB에서 삭제하지 않습니다.</div>
+            <div class="mso-guide-step"><b>4. 48시간 이후 사후관찰</b><br>48시간이 끝난 상품은 하단의 <b>MD 사후관리</b>에서 확대 / 유지관찰 / 보완 / 중단 중 하나를 선택합니다. 반품률이 연결되면 판매량뿐 아니라 판매 품질까지 함께 확인합니다.</div>
+            <div class="mso-guide-step"><b>5. 관찰 종료</b><br>판단이 끝난 상품은 <b>관찰종료</b>를 선택합니다. 히로 레이더에서는 숨겨지지만 상품, 48시간 성과, MD 판단 이력은 DB에 그대로 보관됩니다.</div>
             <div class="mso-guide-step"><b>지표 읽는 법</b><br><b>구매전환율(CVR)</b>은 상품을 본 고객 중 주문으로 이어진 비율, <b>조회당 매출(RPV)</b>은 상품조회 1회가 평균적으로 만든 매출입니다. <b>히로 점수(HERO Score)</b>는 조회·전환·판매·매출을 종합한 100점 기준의 반응 점수입니다.</div>
             """,
             unsafe_allow_html=True,
@@ -162,6 +164,7 @@ def page_radar():
     show["장바구니율"] = show["cart_rate"].apply(_pct)
     show["조회당 매출(RPV)"] = show["rpv"].apply(_money)
     show["반품률"] = show["return_rate"].apply(_return_rate) if "return_rate" in show.columns else "-"
+    show["MD 사후판단"] = show["md_followup"].fillna("-") if "md_followup" in show.columns else "-"
 
     cols = [
         "product_name",
@@ -178,6 +181,7 @@ def page_radar():
         "반품률",
         "hero_score",
         "hero_grade",
+        "MD 사후판단",
         "diagnosis",
     ]
     cols = [c for c in cols if c in show.columns]
@@ -201,6 +205,67 @@ def page_radar():
     )
 
     st.markdown('<div style="height:1.0rem"></div>', unsafe_allow_html=True)
+
+    completed = show[pd.to_datetime(show["close_48h_at"]) < now].copy()
+    with st.expander("48시간 이후 MD 사후관리 · 계속 밀지, 보완할지, 종료할지 결정", expanded=False):
+        if completed.empty:
+            st.info("아직 48시간이 완료된 관찰상품이 없습니다.")
+        else:
+            completed = completed.sort_values("close_48h_at", ascending=False)
+            follow_labels = {
+                int(r["id"]): f"{r['product_name']} · 현재 판단: {r.get('md_followup') or '미정'}"
+                for _, r in completed.iterrows()
+            }
+            launch_id = st.selectbox(
+                "판단할 상품",
+                list(follow_labels.keys()),
+                format_func=lambda x: follow_labels.get(x, str(x)),
+                key="post48h_launch",
+            )
+            chosen = completed[completed["id"].astype(int) == int(launch_id)].iloc[0]
+            current_decision = str(chosen.get("md_followup") or "").strip()
+            decisions = ["확대", "유지관찰", "보완", "중단", "관찰종료"]
+            default_idx = decisions.index(current_decision) if current_decision in decisions else 1
+
+            st.caption(
+                "확대: 집중판매 · 유지관찰: 더 지켜봄 · 보완: 상세/가격/콘텐츠 수정 · "
+                "중단: 추가 노출 우선순위 제외 · 관찰종료: 레이더에서 숨김(기록은 보존)"
+            )
+            with st.form(f"post48h_form_{launch_id}"):
+                decision = st.selectbox("MD 판단", decisions, index=default_idx)
+                note = st.text_area(
+                    "판단 메모",
+                    value=str(chosen.get("md_followup_note") or ""),
+                    placeholder="예: 전환은 좋지만 반품률 확인 후 광고 확대 예정",
+                    height=90,
+                )
+                saved = st.form_submit_button("사후판단 저장", type="primary", use_container_width=True)
+                if saved:
+                    save_post48h_followup(int(launch_id), decision, note)
+                    if decision == "관찰종료":
+                        st.success("관찰종료 처리했습니다. 레이더에서는 숨겨지고 과거 데이터와 판단 이력은 보존됩니다.")
+                    else:
+                        st.success(f"MD 판단을 '{decision}'로 저장했습니다.")
+                    st.rerun()
+
+    ended = ended_followups(20)
+    if not ended.empty:
+        with st.expander("관찰 종료 이력 · 최근 20건", expanded=False):
+            st.dataframe(
+                ended[[c for c in ["product_name", "close_48h_at", "md_followup", "md_followup_note", "md_owner"] if c in ended.columns]].rename(
+                    columns={
+                        "product_name": "상품명",
+                        "close_48h_at": "48시간 마감",
+                        "md_followup": "최종 판단",
+                        "md_followup_note": "판단 메모",
+                        "md_owner": "MD 담당",
+                    }
+                ),
+                use_container_width=True,
+                hide_index=True,
+            )
+            st.caption("다시 관찰하려면 상품 마스터에서 해당 상품의 HERO 관찰을 ON으로 저장하세요.")
+
     _hero_os_guide()
 
 
@@ -535,6 +600,7 @@ def page_48h():
     show["장바구니율"] = show["cart_rate"].apply(_pct)
     show["조회당 매출(RPV)"] = show["rpv"].apply(_money)
     show["반품률"] = show["return_rate"].apply(_return_rate) if "return_rate" in show.columns else "-"
+    show["MD 사후판단"] = show["md_followup"].fillna("-") if "md_followup" in show.columns else "-"
     cols = [
         "product_name",
         "launch_at",
@@ -552,7 +618,7 @@ def page_48h():
         "hero_grade",
         "diagnosis",
         "hero_manual",
-        "review_manual",
+        "MD 사후판단",
     ]
     cols = [c for c in cols if c in show.columns]
     st.dataframe(
@@ -569,7 +635,6 @@ def page_48h():
                 "hero_grade": "자동 등급",
                 "diagnosis": "자동진단",
                 "hero_manual": "MD 히로(HERO)",
-                "review_manual": "재검토",
             }
         ),
         use_container_width=True,
