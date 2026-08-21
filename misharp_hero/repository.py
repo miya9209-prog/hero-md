@@ -168,6 +168,9 @@ def save_product_md(product_no: str, data: dict):
             launch.supplier_product_name = product.supplier_product_name
             launch.launch_at = launch_at
             launch.close_48h_at = launch_at + timedelta(hours=48)
+            # 관찰종료 상품을 상품마스터에서 다시 ON 하면 사후관찰로 재개한다.
+            if launch.review_manual == "관찰종료":
+                launch.review_manual = "유지관찰"
             s.flush()
             obj.launch_id = launch.id
 
@@ -554,8 +557,9 @@ def current_launches(only_observed: bool = False):
                COALESCE(v2.hero_score, m.hero_score) AS hero_score,
                COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
                COALESCE(v2.diagnosis, m.diagnosis) AS diagnosis,
-               v2.cart_count, v2.cart_rate, v2.sellmate_stock_qty,
-               v2.sera_opv, v2.sera_espv, v2.sera_click_value,
+               v2.cart_count, v2.cart_rate,
+               v2.return_order_count, v2.return_qty, v2.return_rate, v2.return_collected_at,
+               l.review_manual AS md_followup, l.md_action AS md_followup_note,
                COALESCE(v2.collected_at, m.collected_at) AS collected_at
         FROM launches l
         LEFT JOIN product_md pm ON pm.launch_id = l.id
@@ -566,6 +570,61 @@ def current_launches(only_observed: bool = False):
         """
     )
 
+
+
+def save_post48h_followup(launch_id: int, decision: str, note: str = ""):
+    """48H 완료 이후 MD 판단 저장. 관찰종료는 레이더에서만 제외하고 기록은 보존한다."""
+    allowed = {"확대", "유지관찰", "보완", "중단", "관찰종료"}
+    decision = str(decision or "").strip()
+    if decision not in allowed:
+        raise ValueError("올바른 사후관리 판단을 선택하세요.")
+
+    with session_scope() as s:
+        launch = s.get(Launch, int(launch_id))
+        if launch is None:
+            raise ValueError("해당 HERO 관찰건을 찾을 수 없습니다.")
+
+        launch.review_manual = decision
+        launch.md_action = (note or "").strip() or None
+
+        pm = s.scalar(select(ProductMD).where(ProductMD.launch_id == launch.id))
+        owner = None
+        if pm is not None:
+            owner = pm.md_owner
+            pm.hero_watch = decision != "관찰종료"
+            pm.updated_at = datetime.utcnow()
+
+        # 현재 상태는 Launch에, 변경 이력은 ActionItem에 남긴다.
+        s.add(
+            ActionItem(
+                product_no=launch.product_no,
+                product_name=launch.product_name or "",
+                issue_type="48H 사후관리",
+                action_text=decision,
+                owner=owner,
+                status="완료",
+                team="MD",
+                note=(note or "").strip() or None,
+            )
+        )
+        s.flush()
+        return {"launch_id": launch.id, "decision": decision, "hero_watch": decision != "관찰종료"}
+
+
+def ended_followups(limit: int = 30):
+    return df(
+        """
+        SELECT l.id AS launch_id, l.product_no, l.product_name, l.launch_at, l.close_48h_at,
+               l.review_manual AS md_followup, l.md_action AS md_followup_note,
+               pm.md_owner, pm.updated_at
+        FROM launches l
+        LEFT JOIN product_md pm ON pm.launch_id=l.id
+        WHERE l.review_manual='관찰종료'
+        ORDER BY pm.updated_at DESC, l.close_48h_at DESC
+        LIMIT :limit
+        """,
+        {"limit": int(limit)},
+    )
 
 def metrics_history():
     v2 = df("SELECT * FROM hero_metrics_v2 ORDER BY end_at DESC")
