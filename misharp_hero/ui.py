@@ -39,6 +39,7 @@ from misharp_hero.services.cafe24_analytics import Cafe24AnalyticsClient, sync_a
 from misharp_hero.services.md_excel_import import import_md_excel
 from misharp_hero.services.oauth import AdminOAuth, load_token
 from misharp_hero.services.sync import sync_launch_metrics
+from misharp_hero.services.cafe24_returns import sync_return_metrics
 
 
 def _pct(v):
@@ -87,7 +88,7 @@ def _hero_os_guide():
             <div class="mso-guide-step"><b>1. 신상품 등록</b><br>상품 마스터에서 상품을 검색한 뒤 시즌, 제작/사입, 실제 출시일시를 입력하고 <b>HERO 관찰 ON</b>으로 저장합니다.</div>
             <div class="mso-guide-step"><b>2. 48시간 자동관찰</b><br>Cafe24 Analytics 기준 상품조회수, 장바구니, 판매건수, 판매수량, 매출, 구매전환율(CVR), 조회당 매출(RPV)을 추적합니다.</div>
             <div class="mso-guide-step"><b>3. 48시간 판정</b><br>히로 점수(HERO Score)와 자동진단을 참고해 확대, 유지관찰, 보완, 중단 여부를 판단합니다.</div>
-            <div class="mso-guide-step"><b>4. 48시간 이후 사후관찰</b><br>48시간이 끝난 상품은 하단의 <b>MD 사후관리</b>에서 확대 / 유지관찰 / 보완 / 중단 중 하나를 선택합니다. 반품률이 연결되면 판매량뿐 아니라 판매 품질까지 함께 확인합니다.</div>
+            <div class="mso-guide-step"><b>4. 48시간 이후 사후관찰</b><br>48시간이 끝난 상품은 하단의 <b>MD 사후관리</b>에서 확대 / 유지관찰 / 보완 / 중단 중 하나를 선택합니다. <b>반품률</b>은 최초 48시간 판매수량 중 이후 실제 반품완료된 수량의 비율로, 초기 판매의 품질을 확인하는 지표입니다.</div>
             <div class="mso-guide-step"><b>5. 관찰 종료</b><br>판단이 끝난 상품은 <b>관찰종료</b>를 선택합니다. 히로 레이더에서는 숨겨지지만 상품, 48시간 성과, MD 판단 이력은 DB에 그대로 보관됩니다.</div>
             <div class="mso-guide-step"><b>지표 읽는 법</b><br><b>구매전환율(CVR)</b>은 상품을 본 고객 중 주문으로 이어진 비율, <b>조회당 매출(RPV)</b>은 상품조회 1회가 평균적으로 만든 매출입니다. <b>히로 점수(HERO Score)</b>는 조회·전환·판매·매출을 종합한 100점 기준의 반응 점수입니다.</div>
             """,
@@ -789,11 +790,20 @@ def page_data_settings():
             st.error(str(e))
 
 
-    if st.button("48시간 HERO 다시 계산", type="primary"):
+    r1, r2 = st.columns(2)
+    if r1.button("48시간 HERO 다시 계산", type="primary", use_container_width=True):
         try:
             with st.spinner("48H 지표 계산 중..."):
                 count = sync_launch_metrics()
             st.success(f"48시간 HERO {count:,}개 갱신")
+        except Exception as e:
+            st.error(str(e))
+
+    if r2.button("반품률 갱신", use_container_width=True):
+        try:
+            with st.spinner("48시간 완료상품의 반품완료 데이터를 확인하는 중..."):
+                count = sync_return_metrics()
+            st.success(f"반품률 {count:,}개 상품 갱신")
         except Exception as e:
             st.error(str(e))
 
@@ -816,4 +826,4 @@ def page_data_settings():
     else:
         st.dataframe(logs, use_container_width=True, hide_index=True)
 
-    st.info("HERO 판정의 공식 성과 데이터는 Cafe24 Analytics입니다. 반품률 데이터 연결은 다음 단계에서 추가합니다.")
+    st.info("HERO 판정의 공식 성과 데이터는 Cafe24 Analytics입니다. 반품률은 최초 48시간 판매분의 실제 반품완료 비율이며 HERO Score에는 넣지 않고 사후 품질판단에 사용합니다.")
