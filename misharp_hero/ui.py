@@ -109,7 +109,7 @@ def page_radar():
         st.info("아직 출시상품 데이터가 없습니다. 상품 스케줄 또는 기존 MD 엑셀을 먼저 등록하세요.")
         return
 
-    now = pd.Timestamp.now()
+    now = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None)
     launch_dt = pd.to_datetime(launches["launch_at"])
     close_dt = pd.to_datetime(launches["close_48h_at"])
     active = launches[(launch_dt <= now) & (close_dt >= now)]
@@ -657,7 +657,7 @@ def page_data_settings():
             st.error(str(e))
     if t2.button("Cafe24 Analytics 테스트"):
         try:
-            end_at = datetime.now()
+            end_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
             start_at = end_at - timedelta(hours=24)
             rows = Cafe24AnalyticsClient().product_views(start_at, end_at)
             st.success(f"Analytics 정상 · 상품조회 지표 {len(rows):,}건")
