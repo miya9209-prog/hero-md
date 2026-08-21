@@ -187,6 +187,13 @@ class HeroMetricV2(Base):
     qty_cvr: Mapped[float] = mapped_column(Float, default=0)
     rpv: Mapped[float] = mapped_column(Float, default=0)
 
+    # 반품률은 48시간 초기점수와 분리해 사후 판매품질 판단에 사용한다.
+    return_order_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    return_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    return_rate: Mapped[float | None] = mapped_column(Float, nullable=True)
+    return_collected_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # v2 호환 컬럼. 신규 HERO 판정에서는 Sellmate 재고를 사용하지 않는다.
     sellmate_stock_qty: Mapped[int | None] = mapped_column(Integer, nullable=True)
     source_confidence: Mapped[str | None] = mapped_column(String(30), nullable=True)
     hero_score: Mapped[float | None] = mapped_column(Float, nullable=True)
