@@ -93,6 +93,27 @@ def _num(v):
         return None
 
 
+def _dt(v):
+    if not v:
+        return None
+    try:
+        # Cafe24 ISO 문자열의 timezone 정보는 DB 호환을 위해 제거한다.
+        return datetime.fromisoformat(str(v).replace("Z", "+00:00")).replace(tzinfo=None)
+    except Exception:
+        return None
+
+
+def _flag(v):
+    if v is None or v == "":
+        return None
+    raw = str(v).strip().upper()
+    if raw in {"T", "TRUE", "Y", "YES", "1"}:
+        return "T"
+    if raw in {"F", "FALSE", "N", "NO", "0"}:
+        return "F"
+    return raw[:20]
+
+
 def normalize_product(p):
     return {
         "product_no": str(p.get("product_no") or "").strip() or None,
@@ -102,6 +123,11 @@ def normalize_product(p):
         "category": p.get("category_name") or "",
         "supply_price": _num(p.get("supply_price")),
         "selling_price": _num(p.get("price") or p.get("selling_price")),
+        "retail_price": _num(p.get("retail_price")),
+        "display": _flag(p.get("display")),
+        "selling": _flag(p.get("selling")),
+        "cafe24_created_at": _dt(p.get("created_date") or p.get("created_at")),
+        "cafe24_updated_at": _dt(p.get("updated_date") or p.get("updated_at")),
         # 중요: Cafe24 Admin의 stock_quantity는 HERO ITEM OS 실제 재고로 사용하지 않음.
         "image_url": p.get("detail_image") or p.get("list_image") or p.get("image_url") or "",
         "updated_at": datetime.utcnow(),
@@ -134,6 +160,11 @@ def bulk_upsert_products(raw_rows, batch_size=500):
                         "category": stmt.excluded.category,
                         "supply_price": stmt.excluded.supply_price,
                         "selling_price": stmt.excluded.selling_price,
+                        "retail_price": stmt.excluded.retail_price,
+                        "display": stmt.excluded.display,
+                        "selling": stmt.excluded.selling,
+                        "cafe24_created_at": stmt.excluded.cafe24_created_at,
+                        "cafe24_updated_at": stmt.excluded.cafe24_updated_at,
                         "image_url": stmt.excluded.image_url,
                         "updated_at": stmt.excluded.updated_at,
                     },
@@ -149,6 +180,11 @@ def bulk_upsert_products(raw_rows, batch_size=500):
                         "category": stmt.excluded.category,
                         "supply_price": stmt.excluded.supply_price,
                         "selling_price": stmt.excluded.selling_price,
+                        "retail_price": stmt.excluded.retail_price,
+                        "display": stmt.excluded.display,
+                        "selling": stmt.excluded.selling,
+                        "cafe24_created_at": stmt.excluded.cafe24_created_at,
+                        "cafe24_updated_at": stmt.excluded.cafe24_updated_at,
                         "image_url": stmt.excluded.image_url,
                         "updated_at": stmt.excluded.updated_at,
                     },
