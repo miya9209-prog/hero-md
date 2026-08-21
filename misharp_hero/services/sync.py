@@ -30,7 +30,7 @@ def _map_by_no(data):
 
 
 def sync_launch_metrics(include_future_close=False):
-    launches = current_launches()
+    launches = current_launches(only_observed=True)
     if launches.empty:
         return 0
 
