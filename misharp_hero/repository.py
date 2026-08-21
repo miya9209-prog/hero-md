@@ -1,14 +1,15 @@
 from __future__ import annotations
-from datetime import datetime
-import json
+from datetime import datetime, timedelta
+
 import pandas as pd
-from sqlalchemy import select
+from sqlalchemy import bindparam, select, text
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 
-from misharp_hero.db import get_session, get_engine, session_scope
+from misharp_hero.db import get_engine, session_scope
 from misharp_hero.models import (
     Product,
+    ProductMD,
     Candidate,
     Launch,
     Metric48h,
@@ -18,13 +19,21 @@ from misharp_hero.models import (
     MonthlyHero,
     ActionItem,
     SeraMetric,
-    OAuthToken,
     SyncLog,
 )
 
 
 def df(sql, params=None):
-    return pd.read_sql(sql, get_engine(), params=params or {})
+    return pd.read_sql(text(sql), get_engine(), params=params or {})
+
+
+def _df_in(sql: str, values: list[str], params=None):
+    if not values:
+        return pd.DataFrame()
+    stmt = text(sql).bindparams(bindparam("product_nos", expanding=True))
+    payload = dict(params or {})
+    payload["product_nos"] = [str(v) for v in values]
+    return pd.read_sql(stmt, get_engine(), params=payload)
 
 
 def upsert_product(data: dict):
@@ -68,10 +77,17 @@ def add_candidate(data: dict):
 
 def add_launch(data: dict):
     with session_scope() as s:
-        q = select(Launch).where(
-            Launch.product_name == data.get("product_name", ""),
-            Launch.launch_at == data["launch_at"],
-        )
+        product_no = str(data.get("product_no") or "").strip() or None
+        if product_no:
+            q = select(Launch).where(
+                Launch.product_no == product_no,
+                Launch.launch_at == data["launch_at"],
+            )
+        else:
+            q = select(Launch).where(
+                Launch.product_name == data.get("product_name", ""),
+                Launch.launch_at == data["launch_at"],
+            )
         obj = s.scalar(q)
         if obj is None:
             obj = Launch()
@@ -81,6 +97,83 @@ def add_launch(data: dict):
                 setattr(obj, k, v)
         s.flush()
         return obj.id
+
+
+def get_product_md(product_no: str):
+    data = df(
+        "SELECT * FROM product_md WHERE product_no=:product_no LIMIT 1",
+        {"product_no": str(product_no)},
+    )
+    if data.empty:
+        return {}
+    return data.iloc[0].to_dict()
+
+
+def save_product_md(product_no: str, data: dict):
+    """MD 운영정보 저장 + HERO 관찰 ON이면 해당 상품의 48H Launch를 자동 생성/갱신."""
+    product_no = str(product_no).strip()
+    if not product_no:
+        raise ValueError("product_no가 필요합니다.")
+
+    with session_scope() as s:
+        product = s.scalar(select(Product).where(Product.product_no == product_no))
+        if product is None:
+            raise ValueError(f"상품번호 {product_no}를 상품 마스터에서 찾을 수 없습니다.")
+
+        obj = s.scalar(select(ProductMD).where(ProductMD.product_no == product_no))
+        if obj is None:
+            obj = ProductMD(product_no=product_no)
+            s.add(obj)
+
+        for k in [
+            "hero_watch",
+            "launch_at",
+            "sale_end_at",
+            "season",
+            "sourcing_type",
+            "md_owner",
+            "md_note",
+        ]:
+            if k in data:
+                setattr(obj, k, data[k])
+
+        launch = None
+        launch_at = data.get("launch_at", obj.launch_at)
+        hero_watch = bool(data.get("hero_watch", obj.hero_watch))
+        if hero_watch and launch_at:
+            if obj.launch_id:
+                launch = s.get(Launch, obj.launch_id)
+            if launch is None:
+                launch = s.scalar(
+                    select(Launch).where(
+                        Launch.product_no == product_no,
+                        Launch.launch_at == launch_at,
+                    )
+                )
+            if launch is None:
+                launch = Launch()
+                s.add(launch)
+            elif launch.launch_at and launch.launch_at != launch_at:
+                # 출시시각이 바뀌면 이전 시간창의 점수/지표는 더 이상 유효하지 않다.
+                old_v2 = s.scalar(select(HeroMetricV2).where(HeroMetricV2.launch_id == launch.id))
+                old_v1 = s.scalar(select(Metric48h).where(Metric48h.launch_id == launch.id))
+                if old_v2 is not None:
+                    s.delete(old_v2)
+                if old_v1 is not None:
+                    s.delete(old_v1)
+
+            launch.product_id = product.id
+            launch.product_no = product_no
+            launch.product_name = product.product_name or ""
+            launch.supplier_product_name = product.supplier_product_name
+            launch.launch_at = launch_at
+            launch.close_48h_at = launch_at + timedelta(hours=48)
+            s.flush()
+            obj.launch_id = launch.id
+
+        obj.updated_at = datetime.utcnow()
+        s.flush()
+        return {"product_md_id": obj.id, "launch_id": obj.launch_id}
 
 
 def upsert_metric48h(data: dict):
@@ -220,11 +313,18 @@ def product_code_to_no_map():
     }
 
 
-def latest_inventory_by_product():
-    data = df(
-        "SELECT product_no, product_code, stock_qty, available_qty, captured_at "
-        "FROM inventory_current"
-    )
+def latest_inventory_by_product(product_nos: list[str] | None = None):
+    if product_nos:
+        data = _df_in(
+            "SELECT product_no, product_code, stock_qty, available_qty, captured_at "
+            "FROM inventory_current WHERE product_no IN :product_nos",
+            product_nos,
+        )
+    else:
+        data = df(
+            "SELECT product_no, product_code, stock_qty, available_qty, captured_at "
+            "FROM inventory_current"
+        )
     if data.empty:
         return data
     data["stock_qty"] = pd.to_numeric(data["stock_qty"], errors="coerce").fillna(0)
@@ -238,12 +338,16 @@ def latest_inventory_by_product():
     return grouped
 
 
-def latest_sera_by_product():
-    data = df(
+def latest_sera_by_product(product_nos: list[str] | None = None):
+    base = (
         "SELECT product_no, product_code, product_name, views, orders, qty, revenue, "
         "opv, espv, click_value, report_date, imported_at FROM sera_metrics "
         "WHERE product_no IS NOT NULL"
     )
+    if product_nos:
+        data = _df_in(base + " AND product_no IN :product_nos", product_nos)
+    else:
+        data = df(base)
     if data.empty:
         return data
     data["product_no"] = data["product_no"].astype(str)
@@ -261,15 +365,18 @@ def latest_sera_by_product():
     })
 
 
-def analytics_period(start_date: str, end_date: str):
-    data = df(
+def analytics_period(start_date: str, end_date: str, product_nos: list[str] | None = None):
+    base = (
         "SELECT product_no, SUM(views) views, SUM(cart_count) cart_count, "
         "SUM(order_count) order_count, SUM(qty) qty, SUM(revenue) revenue "
         "FROM analytics_product_metrics "
-        "WHERE metric_date >= :start_date AND metric_date <= :end_date "
-        "GROUP BY product_no",
-        {"start_date": start_date, "end_date": end_date},
+        "WHERE metric_date >= :start_date AND metric_date <= :end_date"
     )
+    params = {"start_date": start_date, "end_date": end_date}
+    if product_nos:
+        data = _df_in(base + " AND product_no IN :product_nos GROUP BY product_no", product_nos, params)
+    else:
+        data = df(base + " GROUP BY product_no", params)
     if data.empty:
         return data
     data["product_no"] = data["product_no"].astype(str)
@@ -279,42 +386,129 @@ def analytics_period(start_date: str, end_date: str):
     return data
 
 
-def product_master_df(start_date: str, end_date: str, search: str = "", limit: int = 2000):
-    search = (search or "").strip()
-    params = {"limit": int(limit)}
-    if search:
-        params["q"] = f"%{search.lower()}%"
-        products = df(
-            "SELECT product_no, product_code, product_name, supplier_product_name, "
-            "supplier_name, category, supply_price, selling_price, image_url, updated_at "
-            "FROM products WHERE "
-            "LOWER(COALESCE(product_name,'')) LIKE :q OR "
-            "LOWER(COALESCE(product_code,'')) LIKE :q OR "
-            "LOWER(COALESCE(product_no,'')) LIKE :q "
-            "ORDER BY updated_at DESC LIMIT :limit",
-            params,
-        )
-    else:
-        products = df(
-            "SELECT product_no, product_code, product_name, supplier_product_name, "
-            "supplier_name, category, supply_price, selling_price, image_url, updated_at "
-            "FROM products ORDER BY updated_at DESC LIMIT :limit",
-            params,
-        )
+def _product_master_where(filters: dict | None = None):
+    filters = filters or {}
+    where = ["p.product_no IS NOT NULL"]
+    params = {}
 
+    search = str(filters.get("search") or "").strip().lower()
+    if search:
+        where.append(
+            "(LOWER(COALESCE(p.product_name,'')) LIKE :q OR "
+            "LOWER(COALESCE(p.product_code,'')) LIKE :q OR "
+            "LOWER(COALESCE(p.product_no,'')) LIKE :q)"
+        )
+        params["q"] = f"%{search}%"
+
+    for key, col in [
+        ("selling", "p.selling"),
+        ("display", "p.display"),
+        ("category", "p.category"),
+        ("season", "pm.season"),
+        ("sourcing_type", "pm.sourcing_type"),
+    ]:
+        val = filters.get(key)
+        if val not in (None, "", "전체"):
+            where.append(f"{col} = :{key}")
+            params[key] = val
+
+    hero_watch = filters.get("hero_watch")
+    if hero_watch in (True, False):
+        where.append("COALESCE(pm.hero_watch, FALSE) = :hero_watch")
+        params["hero_watch"] = bool(hero_watch)
+
+    return " AND ".join(where), params
+
+
+def product_master_filter_values():
+    def vals(sql, col):
+        x = df(sql)
+        if x.empty:
+            return []
+        return [str(v) for v in x[col].dropna().tolist() if str(v).strip()]
+
+    return {
+        "categories": vals(
+            "SELECT DISTINCT category FROM products WHERE category IS NOT NULL AND category<>'' ORDER BY category",
+            "category",
+        ),
+        "seasons": vals(
+            "SELECT DISTINCT season FROM product_md WHERE season IS NOT NULL AND season<>'' ORDER BY season",
+            "season",
+        ),
+        "sourcing_types": vals(
+            "SELECT DISTINCT sourcing_type FROM product_md WHERE sourcing_type IS NOT NULL AND sourcing_type<>'' ORDER BY sourcing_type",
+            "sourcing_type",
+        ),
+    }
+
+
+def count_product_master(filters: dict | None = None):
+    where, params = _product_master_where(filters)
+    data = df(
+        f"SELECT COUNT(*) AS n FROM products p LEFT JOIN product_md pm ON pm.product_no=p.product_no WHERE {where}",
+        params,
+    )
+    return int(data.iloc[0]["n"]) if not data.empty else 0
+
+
+def count_hero_watch():
+    data = df("SELECT COUNT(*) AS n FROM product_md WHERE hero_watch=TRUE")
+    return int(data.iloc[0]["n"]) if not data.empty else 0
+
+
+def product_master_page(
+    start_date: str,
+    end_date: str,
+    filters: dict | None = None,
+    page: int = 1,
+    page_size: int = 100,
+):
+    where, params = _product_master_where(filters)
+    page = max(1, int(page))
+    page_size = max(20, min(int(page_size), 500))
+    params.update({"limit": page_size, "offset": (page - 1) * page_size})
+
+    products = df(
+        f"""
+        SELECT p.id, p.product_no, p.product_code, p.product_name,
+               p.supplier_product_name, p.supplier_name, p.category,
+               p.supply_price, p.selling_price, p.retail_price,
+               p.display, p.selling, p.image_url,
+               p.cafe24_created_at, p.cafe24_updated_at, p.updated_at,
+               COALESCE(pm.hero_watch, FALSE) AS hero_watch,
+               pm.launch_at, pm.sale_end_at, pm.season, pm.sourcing_type,
+               pm.md_owner, pm.md_note, pm.launch_id,
+               l.close_48h_at,
+               COALESCE(v2.hero_score, m.hero_score) AS hero_score,
+               COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
+               COALESCE(v2.diagnosis, m.diagnosis) AS diagnosis
+        FROM products p
+        LEFT JOIN product_md pm ON pm.product_no = p.product_no
+        LEFT JOIN launches l ON l.id = pm.launch_id
+        LEFT JOIN hero_metrics_v2 v2 ON v2.launch_id = pm.launch_id
+        LEFT JOIN metrics_48h m ON m.launch_id = pm.launch_id
+        WHERE {where}
+        ORDER BY COALESCE(p.cafe24_updated_at, p.updated_at) DESC, p.id DESC
+        LIMIT :limit OFFSET :offset
+        """,
+        params,
+    )
     if products.empty:
         return products
-    products["product_no"] = products["product_no"].astype(str)
 
-    analytics = analytics_period(start_date, end_date)
+    products["product_no"] = products["product_no"].astype(str)
+    product_nos = products["product_no"].tolist()
+
+    analytics = analytics_period(start_date, end_date, product_nos)
     if not analytics.empty:
         products = products.merge(analytics, on="product_no", how="left")
 
-    inv = latest_inventory_by_product()
+    inv = latest_inventory_by_product(product_nos)
     if not inv.empty:
         products = products.merge(inv, on="product_no", how="left")
 
-    sera = latest_sera_by_product()
+    sera = latest_sera_by_product(product_nos)
     if not sera.empty:
         keep = [
             "product_no",
@@ -332,10 +526,24 @@ def product_master_df(start_date: str, end_date: str, search: str = "", limit: i
     return products
 
 
-def current_launches():
+def product_master_df(start_date: str, end_date: str, search: str = "", limit: int = 2000):
+    """기존 호출 호환용. 신규 UI는 product_master_page를 사용한다."""
+    return product_master_page(
+        start_date,
+        end_date,
+        filters={"search": search},
+        page=1,
+        page_size=min(int(limit), 500),
+    )
+
+
+def current_launches(only_observed: bool = False):
+    where = "WHERE pm.hero_watch=TRUE" if only_observed else ""
     return df(
-        """
+        f"""
         SELECT l.*,
+               COALESCE(pm.hero_watch, FALSE) AS hero_watch,
+               pm.season, pm.sourcing_type, pm.md_owner,
                COALESCE(v2.views, m.views, 0) AS views,
                COALESCE(v2.order_count, m.order_count, 0) AS order_count,
                COALESCE(v2.qty, m.qty, 0) AS qty,
@@ -350,8 +558,10 @@ def current_launches():
                v2.sera_opv, v2.sera_espv, v2.sera_click_value,
                COALESCE(v2.collected_at, m.collected_at) AS collected_at
         FROM launches l
+        LEFT JOIN product_md pm ON pm.launch_id = l.id
         LEFT JOIN hero_metrics_v2 v2 ON v2.launch_id = l.id
         LEFT JOIN metrics_48h m ON m.launch_id = l.id
+        {where}
         ORDER BY l.launch_at DESC
         """
     )
