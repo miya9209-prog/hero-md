@@ -491,7 +491,6 @@ def product_master_page(
                COALESCE(pm.auto_discovered, FALSE) AS auto_discovered,
                pm.discovered_at, pm.discovery_source, pm.homepage_seen_at,
                pm.homepage_last_seen_at, pm.homepage_exit_at, pm.homepage_exit_status,
-               p.selling_price, p.display AS cafe24_display, p.selling AS cafe24_selling,
                l.close_48h_at,
                COALESCE(v2.hero_score, m.hero_score) AS hero_score,
                COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
