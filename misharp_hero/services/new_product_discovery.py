@@ -49,7 +49,7 @@ def _url_with_page(url: str, page: int) -> str:
 
 
 def crawl_new_product_page(url: str | None = None, max_pages: int = 10) -> set[str]:
-    """cate_no=541의 현재 노출 상품을 여러 페이지에 걸쳐 전부 수집한다."""
+    """미샵 신상페이지의 현재 노출 상품을 여러 페이지에 걸쳐 전부 수집한다."""
     base = (url or NEW_PRODUCT_URL).strip()
     if not base:
         raise RuntimeError("미샵 신상페이지 URL이 없습니다.")
@@ -105,7 +105,7 @@ def discover_new_products():
     """미샵 신상품 자동탐색 v2.
 
     출시 판정의 기준은 Cafe24 상품 생성일이 아니라
-    'cate_no=541 신상페이지에 직전 스냅샷에는 없던 product_no가 새로 등장했는가'이다.
+    '신상페이지에 직전 스냅샷에는 없던 product_no가 새로 등장했는가'이다.
 
     Cafe24 API는 신규/기존 재오픈 상품 모두의 상품정보, 판매/진열 상태를 검증하는 용도로 사용한다.
     """
@@ -121,7 +121,7 @@ def discover_new_products():
     if previous is None:
         save_new_product_snapshot(now, NEW_PRODUCT_URL, current, set(), set())
         mark_homepage_seen(current, now)
-        msg = f"기준선 생성 · 541 현재상품 {len(current)}개 · 신규등록 0개"
+        msg = f"기준선 생성 · 신상 현재상품 {len(current)}개 · 신규등록 0개"
         log_sync("신상품 자동탐색", "성공", msg)
         return {
             "baseline": True,
@@ -158,7 +158,7 @@ def discover_new_products():
                 skipped.append((pno, "Cafe24 상품DB 미확인"))
                 continue
 
-            # 541에 실제 노출 + Cafe24 API에서 판매/진열중인 경우만 출시 확정
+            # 신상페이지에 실제 노출 + Cafe24 API에서 판매/진열중인 경우만 출시 확정
             if not _flag_true(row.get("display")) or not _flag_true(row.get("selling")):
                 skipped.append((pno, "Cafe24 판매/진열 상태 미확인"))
                 continue
@@ -166,7 +166,7 @@ def discover_new_products():
             result = auto_register_exploration(
                 pno,
                 detected_at=now,
-                source="541 신상페이지 신규등장 + Cafe24 API 확인",
+                source="신상페이지 신규등장 + Cafe24 API 확인",
                 homepage_seen_at=now,
                 launch_at=launch_at,
             )
@@ -178,7 +178,7 @@ def discover_new_products():
     save_new_product_snapshot(now, NEW_PRODUCT_URL, current, added, removed)
 
     msg = (
-        f"541 현재 {len(current)}개 · 신규등장 {len(added)}개 · "
+        f"신상 현재 {len(current)}개 · 신규등장 {len(added)}개 · "
         f"상품탐색 등록 {registered}개 · 페이지이탈 {len(removed)}개"
     )
     if skipped:

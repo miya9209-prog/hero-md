@@ -1054,9 +1054,9 @@ def auto_register_exploration(
     homepage_seen_at: datetime | None = None,
     launch_at: datetime | None = None,
 ):
-    """541 신상페이지 신규등장 상품을 상품 탐색에 등록한다.
+    """신상페이지 신규등장 상품을 상품 탐색에 등록한다.
 
-    같은 product_no가 과거에 이미 판매된 상품이어도 541 페이지에서 새롭게 등장한
+    같은 product_no가 과거에 이미 판매된 상품이어도 신상페이지에서 새롭게 등장한
     '재오픈 신상'이면 새 Launch를 만든다. 단, 현재 48시간 관찰이 살아 있으면 중복 생성하지 않는다.
     """
     product_no = str(product_no or "").strip()
@@ -1102,7 +1102,7 @@ def auto_register_exploration(
         pm.launch_id = launch.id
         pm.auto_discovered = True
         pm.discovered_at = detected_at
-        pm.discovery_source = source or "541 신상페이지 + Cafe24 API"
+        pm.discovery_source = source or "신상페이지 + Cafe24 API"
         pm.homepage_seen_at = homepage_seen_at or detected_at
         pm.homepage_last_seen_at = homepage_seen_at or detected_at
         pm.homepage_exit_at = None
@@ -1134,7 +1134,7 @@ def latest_new_product_snapshot():
 
 
 def new_product_discovery_status():
-    """상품탐색 화면용 최신 541 스냅샷 요약."""
+    """상품탐색 화면용 최신 신상페이지 스냅샷 요약."""
     with session_scope() as s:
         row = s.scalar(
             select(NewProductPageSnapshot)
@@ -1222,9 +1222,9 @@ def mark_homepage_seen(product_nos: set[str], seen_at: datetime):
 
 
 def mark_homepage_exit(product_nos: set[str], exit_at: datetime):
-    """541 페이지에서 사라진 상품을 API 상태와 함께 기록한다.
+    """신상페이지에서 사라진 상품을 API 상태와 함께 기록한다.
 
-    판매중/진열중이면 '541 이탈(품절 가능)'로만 표시하고 품절로 단정하지 않는다.
+    판매중/진열중이면 '신상페이지 이탈(품절 가능)'로만 표시하고 품절로 단정하지 않는다.
     """
     if not product_nos:
         return 0
@@ -1238,7 +1238,7 @@ def mark_homepage_exit(product_nos: set[str], exit_at: datetime):
         elif display in {"F", "FALSE", "N", "NO", "0"}:
             status = "진열종료"
         else:
-            status = "541 이탈(품절 가능)"
+            status = "신상페이지 이탈(품절 가능)"
         status_map[str(r.get("product_no"))] = status
 
     count = 0
@@ -1248,7 +1248,7 @@ def mark_homepage_exit(product_nos: set[str], exit_at: datetime):
             if pm is None:
                 continue
             pm.homepage_exit_at = exit_at
-            pm.homepage_exit_status = status_map.get(pno, "541 이탈")
+            pm.homepage_exit_status = status_map.get(pno, "신상페이지 이탈")
             pm.updated_at = datetime.utcnow()
             count += 1
         s.flush()

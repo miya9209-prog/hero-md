@@ -137,14 +137,14 @@ def _build_diagnosis_rows(data: pd.DataFrame):
 def page_explore():
     st.title("상품 탐색")
     st.caption(
-        "미샵 신상페이지(cate_no=541)에 새롭게 등장한 상품을 출시로 판단하고, "
+        "미샵 신상페이지에 새롭게 등장한 상품을 출시로 판단하고, "
         "Cafe24 API로 상품정보와 판매·진열 상태를 확인한 뒤 자동 등록합니다. "
         "등록 후 48시간 동안 Cafe24 Analytics로 실제 판매반응을 관찰합니다."
     )
 
     status = new_product_discovery_status()
     s1, s2, s3, s4 = st.columns(4)
-    s1.metric("541 현재상품", f"{int(status.get('current') or 0):,}개")
+    s1.metric("신상 현재상품", f"{int(status.get('current') or 0):,}개")
     s2.metric("이번 확인 신규등장", f"{int(status.get('added') or 0):,}개")
     s3.metric("이번 확인 페이지이탈", f"{int(status.get('removed') or 0):,}개")
     checked_at = status.get("captured_at")
@@ -155,10 +155,10 @@ def page_explore():
             checked_text = "-"
     else:
         checked_text = "-"
-    s4.metric("마지막 541 확인", checked_text)
+    s4.metric("마지막 신상 확인", checked_text)
 
     st.caption(
-        "상품탐색 등록은 '541 신규등장 + Cafe24 판매/진열 확인'이 모두 충족된 상품만 자동 처리합니다."
+        "상품탐색 등록은 '신상페이지 신규등장 + Cafe24 판매/진열 확인'이 모두 충족된 상품만 자동 처리합니다."
     )
 
     data = exploration_launches()
