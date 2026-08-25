@@ -259,7 +259,7 @@ def page_judgment_followup():
     data = _build_diagnosis_rows(data)
     data["반품률"] = data["return_rate"].apply(_return_rate)
     data["상품등급"] = data["hero_grade"].fillna("-")
-    data["자동진단"] = data["_diagnosis_live"] + " · " + data["_action_live"]
+    data["자동진단"] = data["_diagnosis_live"] + " → " + data["_action_live"]
     data["WHY"] = data["_why_live"]
     data["MD팀업무"] = data["md_team_work"].fillna("")
     data["제작팀업무"] = data["production_team_work"].fillna("")

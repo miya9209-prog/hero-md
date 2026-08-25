@@ -164,24 +164,82 @@ def diagnose_with_why(row: dict, history: pd.DataFrame | None = None):
     high_cvr = cvr >= cvr_mid
     high_rpv = rpv >= rpv_mid
 
+    # 자동진단은 등급명이 아니라 "무엇이 문제/강점인지 → 무엇을 할지"가
+    # 한 줄에서 바로 보이도록 실행형 문장으로 만든다.
     if score >= 85:
-        diagnosis = "HERO"
-        action = "확대 검토"
+        diagnosis = (
+            f"HERO · CVR {_pct_ko(cvr)}, RPV {_money_ko(rpv)}로 전환·매출 효율 강함"
+        )
+        action = "노출·재고 확대"
     elif (not high_view) and high_cvr and high_rpv:
-        diagnosis = "숨은 HERO"
+        diagnosis = (
+            f"숨은 HERO · 조회 {int(views):,}회로 노출은 낮지만 "
+            f"CVR {_pct_ko(cvr)}, RPV {_money_ko(rpv)}는 강함"
+        )
         action = "노출 확대 후 재평가"
     elif high_view and not high_cvr:
-        diagnosis = "전환 문제"
-        action = "상세·가격·핏·혜택 점검"
+        if cart_rate >= 0.05:
+            diagnosis = (
+                f"전환 문제 · 조회 {int(views):,}회, 장바구니율 {_pct_ko(cart_rate)}인데 "
+                f"CVR {_pct_ko(cvr)}로 구매 직전 이탈"
+            )
+            action = "가격·배송·혜택 점검"
+        else:
+            diagnosis = (
+                f"전환 문제 · 조회 {int(views):,}회는 충분하지만 "
+                f"CVR {_pct_ko(cvr)}로 구매전환 약함"
+            )
+            action = "상세·핏·가격 점검"
     elif score >= 70:
-        diagnosis = "HERO 유력"
-        action = "집중관찰"
+        diagnosis = (
+            f"HERO 유력 · CVR {_pct_ko(cvr)}, RPV {_money_ko(rpv)}로 "
+            "성과가 평균 이상"
+        )
+        action = "노출 유지·재고 확인"
     elif score >= 55:
-        diagnosis = "관찰"
-        action = "추가 데이터 확인"
+        if (not high_view) and (cvr <= 0) and (rpv <= 0):
+            diagnosis = (
+                f"관찰 · 조회 {int(views):,}회로 아직 표본이 적고 "
+                "구매 데이터가 부족함"
+            )
+            action = "노출 확보 후 재평가"
+        elif high_cvr or high_rpv:
+            diagnosis = (
+                f"관찰 · CVR {_pct_ko(cvr)}, RPV {_money_ko(rpv)} 중 "
+                "일부 지표만 강해 추가 확인 필요"
+            )
+            action = "24시간 추가 관찰"
+        else:
+            diagnosis = (
+                f"관찰 · 조회 {int(views):,}회, CVR {_pct_ko(cvr)}로 "
+                "성과가 아직 뚜렷하지 않음"
+            )
+            action = "추가 데이터 확인"
     else:
-        diagnosis = "저반응"
-        action = "우선순위 재검토"
+        if high_view and cvr <= 0:
+            diagnosis = (
+                f"저반응 · 조회 {int(views):,}회는 충분하지만 CVR 0%로 "
+                "상품력·가격·상세페이지 점검 필요"
+            )
+            action = "상품력·가격 우선 점검"
+        elif cart_rate >= 0.05 and cvr < cvr_mid:
+            diagnosis = (
+                f"저반응 · 장바구니율 {_pct_ko(cart_rate)} 대비 "
+                f"CVR {_pct_ko(cvr)}로 구매 이탈 큼"
+            )
+            action = "가격·혜택·배송 점검"
+        elif not high_view:
+            diagnosis = (
+                f"저반응 · 조회 {int(views):,}회로 노출이 부족해 "
+                "성과 판단이 아직 불충분"
+            )
+            action = "최소 노출 확보 후 재판정"
+        else:
+            diagnosis = (
+                f"저반응 · 조회 {int(views):,}회, CVR {_pct_ko(cvr)}, "
+                f"RPV {_money_ko(rpv)}로 전반 성과 약함"
+            )
+            action = "우선순위 재검토"
 
     # 48H 이후 반품률은 품질 경고로 WHY에 반영하되 HERO Score 자체는 변경하지 않는다.
     return_warning = None
