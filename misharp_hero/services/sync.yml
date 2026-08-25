@@ -1,0 +1,44 @@
+name: 30분 신상품 탐색 + 판매반응 갱신
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17,47 * * * *"          # 평상시 30분 감시 (UTC)
+    - cron: "50 2 * * 1-5"           # 평일 11:50 KST
+    - cron: "0,10,20,30,40 3 * * 1-5" # 평일 12:00~12:40 KST 집중감시
+
+jobs:
+  sync-hero:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+      CAFE24_MALL_ID: ${{ secrets.CAFE24_MALL_ID }}
+      CAFE24_CLIENT_ID: ${{ secrets.CAFE24_CLIENT_ID }}
+      CAFE24_CLIENT_SECRET: ${{ secrets.CAFE24_CLIENT_SECRET }}
+      MISHARP_HOME_URL: ${{ vars.MISHARP_HOME_URL || 'https://misharp.co.kr/' }}
+      MISHARP_NEW_PRODUCT_URL: ${{ vars.MISHARP_NEW_PRODUCT_URL || 'https://misharp.co.kr/product/list.html?cate_no=541' }}
+
+    steps:
+      - name: 레포 코드 불러오기
+        uses: actions/checkout@v4
+
+      - name: Python 준비
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: 필요한 패키지 설치
+        run: pip install -r requirements.txt
+
+      - name: DB 구조 확인
+        run: python -m scripts.init_db
+
+      - name: 신상품 자동 탐색
+        run: python -m scripts.sync_discovery
+
+      - name: 48시간 판매반응 + 반품률 갱신
+        run: python -m scripts.sync_cafe24 --launches
