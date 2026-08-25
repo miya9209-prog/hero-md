@@ -126,6 +126,18 @@ class Cafe24AnalyticsClient:
     def product_sales(self, start_at: datetime, end_at: datetime):
         return self.paginate("/products/sales", self._base_params(start_at, end_at))
 
+    def product_categorydetails(self, start_at: datetime, end_at: datetime):
+        # Cafe24 Data API 공식 endpoint. 상품은 복수 카테고리에 속할 수 있어
+        # product_no + category_no 단위 행을 그대로 보존한다.
+        params = {
+            "mall_id": CAFE24_MALL_ID,
+            "shop_no": CAFE24_SHOP_NO,
+            "start_date": start_at.strftime("%Y-%m-%d"),
+            "end_date": end_at.strftime("%Y-%m-%d"),
+            "timezone": "Asia/Seoul",
+        }
+        return self.paginate("/products/categorydetails", params)
+
     def carts_action(self, start_at: datetime, end_at: datetime):
         return self.paginate("/carts/action", self._base_params(start_at, end_at))
 
