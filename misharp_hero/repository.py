@@ -14,6 +14,7 @@ from misharp_hero.models import (
     Launch,
     Metric48h,
     AnalyticsProductMetric,
+    AnalyticsHistoryMonthly,
     InventoryCurrent,
     HeroMetricV2,
     MonthlyHero,
@@ -262,6 +263,7 @@ def upsert_analytics_daily(rows: list[dict]):
         return 0
     stmt = _upsert_stmt(
         AnalyticsProductMetric,
+    AnalyticsHistoryMonthly,
         rows,
         ["metric_date", "product_no"],
         [
@@ -482,6 +484,8 @@ def product_master_page(
                COALESCE(pm.hero_watch, FALSE) AS hero_watch,
                pm.launch_at, pm.sale_end_at, pm.season, pm.sourcing_type,
                pm.md_owner, pm.md_note, pm.launch_id,
+               COALESCE(pm.auto_discovered, FALSE) AS auto_discovered,
+               pm.discovered_at, pm.discovery_source, pm.homepage_seen_at,
                l.close_48h_at,
                COALESCE(v2.hero_score, m.hero_score) AS hero_score,
                COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
@@ -507,25 +511,8 @@ def product_master_page(
     if not analytics.empty:
         products = products.merge(analytics, on="product_no", how="left")
 
-    inv = latest_inventory_by_product(product_nos)
-    if not inv.empty:
-        products = products.merge(inv, on="product_no", how="left")
-
-    sera = latest_sera_by_product(product_nos)
-    if not sera.empty:
-        keep = [
-            "product_no",
-            "sera_views",
-            "sera_orders",
-            "sera_qty",
-            "sera_revenue",
-            "sera_opv",
-            "sera_espv",
-            "sera_click_value",
-            "sera_report_date",
-        ]
-        products = products.merge(sera[keep], on="product_no", how="left")
-
+    # v3.0 공식 판정 데이터는 Cafe24 Analytics 하나만 사용한다.
+    # SERA / Sellmate는 레거시 테이블은 보존하되 상품DB 화면/판정에는 혼합하지 않는다.
     return products
 
 
@@ -546,7 +533,9 @@ def current_launches(only_observed: bool = False):
         f"""
         SELECT l.*,
                COALESCE(pm.hero_watch, FALSE) AS hero_watch,
-               pm.season, pm.sourcing_type, pm.md_owner,
+               pm.season, pm.sourcing_type, pm.md_owner, pm.md_note,
+               COALESCE(pm.auto_discovered, FALSE) AS auto_discovered,
+               pm.discovered_at, pm.discovery_source, pm.homepage_seen_at,
                COALESCE(v2.views, m.views, 0) AS views,
                COALESCE(v2.order_count, m.order_count, 0) AS order_count,
                COALESCE(v2.qty, m.qty, 0) AS qty,
@@ -557,9 +546,12 @@ def current_launches(only_observed: bool = False):
                COALESCE(v2.hero_score, m.hero_score) AS hero_score,
                COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
                COALESCE(v2.diagnosis, m.diagnosis) AS diagnosis,
+               v2.why_text, v2.recommended_action,
                v2.cart_count, v2.cart_rate,
                v2.return_order_count, v2.return_qty, v2.return_rate, v2.return_collected_at,
-               l.review_manual AS md_followup, l.md_action AS md_followup_note,
+               l.review_manual AS md_followup,
+               l.md_action AS md_team_work,
+               l.production_action AS production_team_work,
                COALESCE(v2.collected_at, m.collected_at) AS collected_at
         FROM launches l
         LEFT JOIN product_md pm ON pm.launch_id = l.id
@@ -586,20 +578,32 @@ def update_return_metric(launch_id: int, return_order_count: int, return_qty: in
         return True
 
 
-def save_post48h_followup(launch_id: int, decision: str, note: str = ""):
-    """48H 완료 이후 MD 판단 저장. 관찰종료는 레이더에서만 제외하고 기록은 보존한다."""
-    allowed = {"확대", "유지관찰", "보완", "중단", "관찰종료"}
-    decision = str(decision or "").strip()
+def save_judgment_workflow(
+    launch_id: int,
+    decision: str,
+    md_team_work: str = "",
+    production_team_work: str = "",
+    other_note: str = "",
+):
+    """상품 판정/후속업무 공유 저장.
+
+    관찰종료는 상품DB/이력은 보존하고 '상품 탐색'과 기본 후속업무 목록에서만 제외한다.
+    """
+    allowed = {"미정", "확대", "유지관찰", "보완", "중단", "관찰종료"}
+    decision = str(decision or "미정").strip()
     if decision not in allowed:
-        raise ValueError("올바른 사후관리 판단을 선택하세요.")
+        raise ValueError("올바른 상품 판정을 선택하세요.")
 
     with session_scope() as s:
         launch = s.get(Launch, int(launch_id))
         if launch is None:
-            raise ValueError("해당 HERO 관찰건을 찾을 수 없습니다.")
+            raise ValueError("해당 상품 관찰건을 찾을 수 없습니다.")
 
-        launch.review_manual = decision
-        launch.md_action = (note or "").strip() or None
+        launch.review_manual = None if decision == "미정" else decision
+        launch.md_action = (md_team_work or "").strip() or None
+        launch.production_action = (production_team_work or "").strip() or None
+        launch.other_note = (other_note or "").strip() or None
+        launch.judgment_updated_at = datetime.utcnow()
 
         pm = s.scalar(select(ProductMD).where(ProductMD.launch_id == launch.id))
         owner = None
@@ -608,22 +612,31 @@ def save_post48h_followup(launch_id: int, decision: str, note: str = ""):
             pm.hero_watch = decision != "관찰종료"
             pm.updated_at = datetime.utcnow()
 
-        # 현재 상태는 Launch에, 변경 이력은 ActionItem에 남긴다.
         s.add(
             ActionItem(
                 product_no=launch.product_no,
                 product_name=launch.product_name or "",
-                issue_type="48H 사후관리",
+                issue_type="상품 판정 및 후속업무",
                 action_text=decision,
                 owner=owner,
                 status="완료",
-                team="MD",
-                note=(note or "").strip() or None,
+                team="공유",
+                note=" | ".join(
+                    x for x in [
+                        f"MD: {(md_team_work or '').strip()}" if (md_team_work or "").strip() else "",
+                        f"제작: {(production_team_work or '').strip()}" if (production_team_work or "").strip() else "",
+                        f"기타: {(other_note or '').strip()}" if (other_note or "").strip() else "",
+                    ] if x
+                ) or None,
             )
         )
         s.flush()
         return {"launch_id": launch.id, "decision": decision, "hero_watch": decision != "관찰종료"}
 
+
+def save_post48h_followup(launch_id: int, decision: str, note: str = ""):
+    """v2 호환 wrapper."""
+    return save_judgment_workflow(launch_id, decision, md_team_work=note)
 
 def ended_followups(limit: int = 30):
     return df(
@@ -639,6 +652,134 @@ def ended_followups(limit: int = 30):
         """,
         {"limit": int(limit)},
     )
+
+
+def recent_registered_product_nos(cutoff_at: datetime):
+    data = df(
+        "SELECT product_no FROM products WHERE product_no IS NOT NULL AND cafe24_created_at >= :cutoff",
+        {"cutoff": cutoff_at},
+    )
+    if data.empty:
+        return set()
+    return set(data["product_no"].astype(str).tolist())
+
+
+def upsert_history_monthly(rows: list[dict]):
+    if not rows:
+        return 0
+    engine = get_engine()
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            stmt = pg_insert(AnalyticsHistoryMonthly).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[AnalyticsHistoryMonthly.period_month, AnalyticsHistoryMonthly.product_no],
+                set_={
+                    "product_name": stmt.excluded.product_name,
+                    "views": stmt.excluded.views,
+                    "cart_count": stmt.excluded.cart_count,
+                    "cart_rate": stmt.excluded.cart_rate,
+                    "order_count": stmt.excluded.order_count,
+                    "qty": stmt.excluded.qty,
+                    "revenue": stmt.excluded.revenue,
+                    "cvr": stmt.excluded.cvr,
+                    "rpv": stmt.excluded.rpv,
+                    "collected_at": stmt.excluded.collected_at,
+                },
+            )
+        elif engine.dialect.name == "sqlite":
+            stmt = sqlite_insert(AnalyticsHistoryMonthly).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["period_month", "product_no"],
+                set_={
+                    "product_name": stmt.excluded.product_name,
+                    "views": stmt.excluded.views,
+                    "cart_count": stmt.excluded.cart_count,
+                    "cart_rate": stmt.excluded.cart_rate,
+                    "order_count": stmt.excluded.order_count,
+                    "qty": stmt.excluded.qty,
+                    "revenue": stmt.excluded.revenue,
+                    "cvr": stmt.excluded.cvr,
+                    "rpv": stmt.excluded.rpv,
+                    "collected_at": stmt.excluded.collected_at,
+                },
+            )
+        else:
+            raise RuntimeError(f"지원하지 않는 DB: {engine.dialect.name}")
+        conn.execute(stmt)
+    return len(rows)
+
+
+def history_summary():
+    return df(
+        """
+        SELECT COUNT(*) AS rows_count,
+               COUNT(DISTINCT product_no) AS product_count,
+               MIN(period_month) AS first_month,
+               MAX(period_month) AS last_month
+        FROM analytics_history_monthly
+        """
+    )
+
+
+def history_recent_rows(limit: int = 20):
+    return df(
+        """
+        SELECT h.period_month, h.product_no, COALESCE(p.product_name, h.product_name) AS product_name,
+               h.views, h.cart_count, h.order_count, h.qty, h.revenue, h.cvr, h.rpv
+        FROM analytics_history_monthly h
+        LEFT JOIN products p ON p.product_no=h.product_no
+        ORDER BY h.period_month DESC, h.revenue DESC
+        LIMIT :limit
+        """,
+        {"limit": int(limit)},
+    )
+
+def dna_history_dataset(months: int = 12):
+    """최근 3년 월별 성과에서 미샵 DNA 분석용 상품 집계 데이터를 만든다.
+
+    전체 회사 상품DB는 보존하지만 DNA 분석 범위는 최대 36개월로 제한한다.
+    상품별로 선택 기간의 조회/장바구니/판매/매출을 합산하고 CVR/RPV를 재계산한다.
+    """
+    months = max(1, min(int(months or 12), 36))
+    latest = df("SELECT MAX(period_month) AS max_month FROM analytics_history_monthly")
+    if latest.empty or not latest.iloc[0].get("max_month"):
+        return pd.DataFrame()
+    max_month = pd.Period(str(latest.iloc[0]["max_month"]), freq="M")
+    min_month = max_month - (months - 1)
+    data = df(
+        """
+        SELECT h.product_no,
+               COALESCE(MAX(p.product_name), MAX(h.product_name)) AS product_name,
+               MAX(p.category) AS category,
+               MAX(p.selling_price) AS selling_price,
+               SUM(COALESCE(h.views,0)) AS views,
+               SUM(COALESCE(h.cart_count,0)) AS cart_count,
+               SUM(COALESCE(h.order_count,0)) AS order_count,
+               SUM(COALESCE(h.qty,0)) AS qty,
+               SUM(COALESCE(h.revenue,0)) AS revenue,
+               MIN(h.period_month) AS first_month,
+               MAX(h.period_month) AS last_month
+        FROM analytics_history_monthly h
+        LEFT JOIN products p ON p.product_no=h.product_no
+        WHERE h.period_month BETWEEN :start_month AND :end_month
+          AND (p.cafe24_created_at IS NULL OR p.cafe24_created_at >= :cutoff)
+        GROUP BY h.product_no
+        """,
+        {
+            "start_month": str(min_month),
+            "end_month": str(max_month),
+            "cutoff": datetime.utcnow() - timedelta(days=365 * 3 + 2),
+        },
+    )
+    if data.empty:
+        return data
+    for c in ["views", "cart_count", "order_count", "qty", "revenue", "selling_price"]:
+        if c in data.columns:
+            data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
+    data["cvr"] = data.apply(lambda r: (float(r["order_count"]) / float(r["views"])) if float(r["views"]) > 0 else 0.0, axis=1)
+    data["rpv"] = data.apply(lambda r: (float(r["revenue"]) / float(r["views"])) if float(r["views"]) > 0 else 0.0, axis=1)
+    data["cart_rate"] = data.apply(lambda r: (float(r["cart_count"]) / float(r["views"])) if float(r["views"]) > 0 else 0.0, axis=1)
+    return data
 
 def metrics_history():
     v2 = df("SELECT * FROM hero_metrics_v2 ORDER BY end_at DESC")
@@ -694,3 +835,135 @@ def sync_status_df(limit=30):
 def count_products():
     data = df("SELECT COUNT(*) AS n FROM products")
     return int(data.iloc[0]["n"]) if not data.empty else 0
+
+
+def exploration_launches():
+    """현재 48시간 탐색창에 있는 상품만 반환한다."""
+    data = current_launches(only_observed=True)
+    if data.empty:
+        return data
+    now = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None)
+    launch_at = pd.to_datetime(data["launch_at"], errors="coerce")
+    close_at = pd.to_datetime(data["close_48h_at"], errors="coerce")
+    mask = launch_at.notna() & close_at.notna() & (launch_at <= now) & (close_at > now)
+    return data[mask].sort_values("launch_at", ascending=False).reset_index(drop=True)
+
+
+def judgment_launches(include_ended: bool = False):
+    """48시간 완료 후 상품 판정 및 공유 후속업무 대상."""
+    data = current_launches(only_observed=False)
+    if data.empty:
+        return data
+    now = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None)
+    close_at = pd.to_datetime(data["close_48h_at"], errors="coerce")
+    data = data[close_at.notna() & (close_at <= now)].copy()
+    if not include_ended and "md_followup" in data.columns:
+        data = data[data["md_followup"].fillna("") != "관찰종료"].copy()
+    return data.sort_values("close_48h_at", ascending=False).reset_index(drop=True)
+
+
+def recent_products_for_discovery(cutoff_at: datetime):
+    """자동탐색 후보: 최근 등록 + 판매중 + 진열중인 Cafe24 상품."""
+    return df(
+        """
+        SELECT p.product_no, p.product_name, p.product_code, p.category,
+               p.selling_price, p.image_url, p.cafe24_created_at,
+               p.display, p.selling,
+               pm.id AS product_md_id, pm.launch_id, pm.hero_watch,
+               pm.discovered_at, pm.discovery_source, pm.homepage_seen_at
+        FROM products p
+        LEFT JOIN product_md pm ON pm.product_no=p.product_no
+        WHERE p.product_no IS NOT NULL
+          AND p.cafe24_created_at >= :cutoff
+          AND COALESCE(p.display,'T') IN ('T','TRUE','Y','YES','1')
+          AND COALESCE(p.selling,'T') IN ('T','TRUE','Y','YES','1')
+        ORDER BY p.cafe24_created_at DESC
+        """,
+        {"cutoff": cutoff_at},
+    )
+
+
+def auto_register_exploration(
+    product_no: str,
+    detected_at: datetime,
+    source: str,
+    homepage_seen_at: datetime | None = None,
+):
+    """신상품을 상품 탐색에 자동 등록하고 48시간 관찰건을 생성한다."""
+    product_no = str(product_no or "").strip()
+    if not product_no:
+        return {"created": False, "reason": "product_no 없음"}
+
+    with session_scope() as s:
+        product = s.scalar(select(Product).where(Product.product_no == product_no))
+        if product is None:
+            return {"created": False, "reason": "상품DB 없음"}
+
+        pm = s.scalar(select(ProductMD).where(ProductMD.product_no == product_no))
+        if pm is None:
+            pm = ProductMD(product_no=product_no)
+            s.add(pm)
+
+        # 이미 관찰 중이거나 판정 이력이 있는 상품은 중복 자동등록하지 않는다.
+        if pm.launch_id:
+            launch = s.get(Launch, pm.launch_id)
+            if launch is not None:
+                if homepage_seen_at and pm.homepage_seen_at is None:
+                    pm.homepage_seen_at = homepage_seen_at
+                if source and not pm.discovery_source:
+                    pm.discovery_source = source
+                if pm.discovered_at is None:
+                    pm.discovered_at = detected_at
+                pm.updated_at = datetime.utcnow()
+                s.flush()
+                return {"created": False, "launch_id": launch.id, "reason": "기존 관찰건"}
+
+        launch_at = detected_at
+        launch = Launch(
+            product_id=product.id,
+            product_no=product_no,
+            product_name=product.product_name or "",
+            supplier_product_name=product.supplier_product_name,
+            launch_at=launch_at,
+            close_48h_at=launch_at + timedelta(hours=48),
+        )
+        s.add(launch)
+        s.flush()
+
+        pm.hero_watch = True
+        pm.launch_at = launch_at
+        pm.launch_id = launch.id
+        pm.auto_discovered = True
+        pm.discovered_at = detected_at
+        pm.discovery_source = source or "Cafe24 API"
+        if homepage_seen_at:
+            pm.homepage_seen_at = homepage_seen_at
+        pm.updated_at = datetime.utcnow()
+        s.flush()
+        return {"created": True, "launch_id": launch.id}
+
+
+def three_year_history_benchmark():
+    """WHY 설명용 비교집단.
+
+    48H 관찰 히스토리가 충분하면 등록일 기준 최근 3년 상품만 사용한다.
+    현재 시스템 누적이 적을 경우에는 이용 가능한 완료 관찰건으로 자동 fallback한다.
+    """
+    cutoff = datetime.utcnow() - timedelta(days=365 * 3 + 1)
+    data = df(
+        """
+        SELECT v2.views, v2.cart_count, v2.cart_rate, v2.order_count, v2.qty,
+               v2.revenue, v2.cvr, v2.rpv, v2.hero_score, v2.return_rate,
+               p.category, p.selling_price, p.cafe24_created_at
+        FROM hero_metrics_v2 v2
+        JOIN launches l ON l.id=v2.launch_id
+        LEFT JOIN products p ON p.product_no=v2.product_no
+        WHERE l.close_48h_at <= :now
+          AND (p.cafe24_created_at IS NULL OR p.cafe24_created_at >= :cutoff)
+        ORDER BY l.close_48h_at DESC
+        """,
+        {"now": datetime.utcnow(), "cutoff": cutoff},
+    )
+    # 최근 3년 데이터가 5개 미만이면 점수/WHY 엔진이 절대기준으로 fallback한다.
+    # 3년 이전 데이터를 억지로 섞지 않는다.
+    return data

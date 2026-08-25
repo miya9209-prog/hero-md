@@ -1,57 +1,30 @@
 # MISHARP HERO ITEM OS
 
-미샵의 신상품/주력상품을 **상품 마스터 → 조회/장바구니/판매 → 실제 재고 → 48H HERO 판정 → MD 실행**으로 연결하는 운영 OS입니다.
+MISHARP 신상품 탐색·48시간 판정·후속업무 공유 시스템.
 
-## 핵심 원칙
+## v3.0 운영 구조
+`상품 탐색 → 상품 판정 및 후속업무 관리`
 
-- **실제 재고의 기준은 Sellmate API**입니다. Cafe24 Admin의 재고수량은 HERO 판정과 재고 의사결정에 사용하지 않습니다.
-- **상품 행동·판매 통계의 1차 기준은 Cafe24 Analytics**입니다.
-  - 상품 조회: `/products/view`
-  - 장바구니: `/carts/action`
-  - 판매건수·판매수량·매출: `/products/sales`
-- **SERA는 보완·교차검증 데이터**로 사용합니다.
-  - 조회수, 주문, 수량, 매출, OpV, ESpV, 클릭가치
-- Cafe24 상품 마스터는 `product_no`를 중심으로 연결하고, Sellmate는 `product_code/variant_code` 매핑을 지원합니다.
+### 상품 탐색
+Cafe24 API와 홈페이지 보조 크롤링을 이용해 신상품을 자동 발견합니다.
+신상품은 별도 입력 없이 48시간 관찰을 시작하고 Cafe24 Analytics가 자동 수집됩니다.
 
-## 화면 구조
+### 상품 판정 및 후속업무 관리
+48시간 완료 상품이 자동 이동합니다.
+상품등급·자동진단·WHY·반품률을 보고 판정하고,
+MD팀업무 / 제작팀업무 / 기타 메모를 공유 저장합니다.
 
-좌측 메뉴를 사용하지 않고 Streamlit `st.navigation(position="top")` 기반 상단 메뉴를 사용합니다.
+### 관리자
+상품DB와 데이터·설정은 팀 공용으로 접근하며 별도 관리자 비밀번호를 사용하지 않습니다.
 
-`히로 레이더 | 상품 마스터 | 상품 스케줄 | 48H 판정 | 월간 HERO | MD 실행 | 데이터·설정`
+## 공식 데이터
+HERO 판정에는 Cafe24 Analytics 하나만 사용합니다.
+반품률은 48시간 이후 사후 품질판단에 사용하며 HERO Score에는 포함하지 않습니다.
 
-이는 향후 SELLER OS의 한 모듈로 삽입하기 위한 구조입니다.
+## 자동화
+- 30분: 신상품 탐색 + 48H Analytics + 반품률
+- 일일: 상품DB 전체 재검증
+- 선택: 최근 36개월 Analytics history backfill
 
-## 데이터 소스별 역할
-
-| 데이터 | 기준 소스 | 역할 |
-|---|---|---|
-| 상품번호/상품명/가격 | Cafe24 Admin | 상품 마스터 |
-| 상품 조회수 | Cafe24 Analytics | HERO 수요 신호 |
-| 장바구니 담긴수/담김율 | Cafe24 Analytics | 구매의향 신호 |
-| 판매건수/판매수량/매출 | Cafe24 Analytics | 전환/매출 신호 |
-| 클릭가치/OpV/ESpV | SERA | 보완·교차검증 |
-| 실제 재고 | **Sellmate API** | 재발주/결품/재고위험 판단 |
-| Cafe24 Admin 재고 | 사용 안 함 | 참고도 하지 않는 것을 원칙으로 함 |
-
-## 처음 실행
-
-```bash
-python -m venv .venv
-# Windows
-.venv\Scripts\activate
-pip install -r requirements.txt
-python -m scripts.init_db
-streamlit run app.py
-```
-
-## 현재 기존 배포에서 바꿔야 하는 Secrets
-
-기존 Cafe24 설정에 아래 scope를 포함시킨 뒤 **Cafe24 OAuth를 한 번 다시 승인**해야 Analytics가 동작합니다.
-
-```toml
-CAFE24_SCOPES = "mall.read_product mall.read_order mall.read_analytics"
-```
-
-Sellmate는 셀메이트 개발자 포털/신청을 통해 발급받은 **실제 API Base URL, Token, 재고 Endpoint, 응답 필드명**을 Secrets에 넣습니다. 공개 웹 정보만으로 고객별 API 스펙을 추정하지 않습니다.
-
-자세한 과정은 `SETUP_GUIDE_KO.md`와 `docs/`를 보세요.
+## 설치
+자세한 적용 순서는 `README_APPLY_FULL_REPO.md`를 참고하세요.

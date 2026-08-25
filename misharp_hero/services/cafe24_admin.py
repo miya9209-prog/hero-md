@@ -34,9 +34,26 @@ class Cafe24AdminClient:
     def get(self, path, params=None):
         url = f"{self.base}{path}"
         last_error = None
+        token = valid_access_token("admin")
+        if not token:
+            raise RuntimeError("Cafe24 Admin 인증토큰이 없습니다.")
+
         for attempt in range(5):
             try:
-                r = requests.get(url, headers=self.headers(), params=params or {}, timeout=40)
+                headers = {
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                    "X-Cafe24-Api-Version": CAFE24_API_VERSION,
+                }
+                r = requests.get(url, headers=headers, params=params or {}, timeout=40)
+
+                if r.status_code == 401:
+                    # Force one authoritative refresh after server rejection.
+                    token = valid_access_token("admin", force_refresh=True)
+                    if token and attempt < 4:
+                        time.sleep(0.2)
+                        continue
+
                 if r.status_code == 429:
                     time.sleep(2 + attempt * 2)
                     continue

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
-from zoneinfo import ZoneInfo
+from datetime import datetime, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 import math
 import tempfile
 
@@ -15,31 +15,50 @@ from misharp_hero.config import (
     CAFE24_CLIENT_ID,
     CAFE24_REDIRECT_URI,
     CAFE24_SCOPES,
+    MISHARP_NEW_PRODUCT_URL,
+    MISHARP_HOME_URL,
 )
-from misharp_hero.hero_score import prelaunch_score
+from misharp_hero.hero_score import diagnose_with_why
 from misharp_hero.repository import (
-    action_df,
-    candidate_df,
     count_products,
     count_product_master,
     count_hero_watch,
-    current_launches,
+    ended_followups,
+    exploration_launches,
     get_product_md,
-    monthly_hero_df,
+    history_summary,
+    dna_history_dataset,
+    judgment_launches,
     product_master_filter_values,
     product_master_page,
+    save_judgment_workflow,
     save_product_md,
-    save_post48h_followup,
-    ended_followups,
     sync_status_df,
-    df,
+    three_year_history_benchmark,
 )
-from misharp_hero.services.cafe24_admin import Cafe24AdminClient, sync_products_full, sync_products_incremental
-from misharp_hero.services.cafe24_analytics import Cafe24AnalyticsClient, sync_analytics_days
+from misharp_hero.services.cafe24_admin import (
+    Cafe24AdminClient,
+    sync_products_full,
+    sync_products_incremental,
+)
+from misharp_hero.services.cafe24_analytics import (
+    Cafe24AnalyticsClient,
+    sync_analytics_days,
+)
+from misharp_hero.services.cafe24_history import sync_history_month
+from misharp_hero.services.cafe24_returns import sync_return_metrics
 from misharp_hero.services.md_excel_import import import_md_excel
+from misharp_hero.services.new_product_discovery import discover_new_products
 from misharp_hero.services.oauth import AdminOAuth, load_token
 from misharp_hero.services.sync import sync_launch_metrics
-from misharp_hero.services.cafe24_returns import sync_return_metrics
+
+
+KST = ZoneInfo("Asia/Seoul")
+
+
+def html_escape(v):
+    import html
+    return html.escape(str(v or ""))
 
 
 def _pct(v):
@@ -64,45 +83,12 @@ def _intfmt(v):
 
 
 def _return_rate(v):
-    """반품 데이터 연동 전에는 '-'를 표시하고, 향후 return_rate 컬럼이 생기면 자동 사용."""
     if v is None or (isinstance(v, float) and pd.isna(v)):
         return "-"
     try:
         return f"{float(v) * 100:.2f}%"
     except Exception:
         return "-"
-
-
-def _page_caption(text: str):
-    st.caption(text)
-
-
-def _hero_os_guide():
-    with st.expander("HERO ITEM OS 이용방법 · 처음 사용하는 MD는 꼭 읽어주세요", expanded=False):
-        st.markdown(
-            """
-            <div class="mso-guide-intro">
-            HERO ITEM OS는 신상품을 등록한 뒤 초기 48시간의 실제 반응을 추적하고,
-            이후에도 반품률과 판매 품질을 보면서 <b>더 밀 상품 / 보완할 상품 / 종료할 상품</b>을 결정하기 위한 MD 의사결정 도구입니다.
-            </div>
-            <div class="mso-guide-step"><b>1. 신상품 등록</b><br>상품 마스터에서 상품을 검색한 뒤 시즌, 제작/사입, 실제 출시일시를 입력하고 <b>HERO 관찰 ON</b>으로 저장합니다.</div>
-            <div class="mso-guide-step"><b>2. 48시간 자동관찰</b><br>Cafe24 Analytics 기준 상품조회수, 장바구니, 판매건수, 판매수량, 매출, 구매전환율(CVR), 조회당 매출(RPV)을 추적합니다.</div>
-            <div class="mso-guide-step"><b>3. 48시간 판정</b><br>히로 점수(HERO Score)와 자동진단을 참고해 확대, 유지관찰, 보완, 중단 여부를 판단합니다.</div>
-            <div class="mso-guide-step"><b>4. 48시간 이후 사후관찰</b><br>48시간이 끝난 상품은 하단의 <b>MD 사후관리</b>에서 확대 / 유지관찰 / 보완 / 중단 중 하나를 선택합니다. <b>반품률</b>은 최초 48시간 판매수량 중 이후 실제 반품완료된 수량의 비율로, 초기 판매의 품질을 확인하는 지표입니다.</div>
-            <div class="mso-guide-step"><b>5. 관찰 종료</b><br>판단이 끝난 상품은 <b>관찰종료</b>를 선택합니다. 히로 레이더에서는 숨겨지지만 상품, 48시간 성과, MD 판단 이력은 DB에 그대로 보관됩니다.</div>
-            <div class="mso-guide-step"><b>지표 읽는 법</b><br><b>구매전환율(CVR)</b>은 상품을 본 고객 중 주문으로 이어진 비율, <b>조회당 매출(RPV)</b>은 상품조회 1회가 평균적으로 만든 매출입니다. <b>히로 점수(HERO Score)</b>는 조회·전환·판매·매출을 종합한 100점 기준의 반응 점수입니다.</div>
-            """,
-            unsafe_allow_html=True,
-        )
-
-
-def _yn_flag(v, true_label, false_label):
-    raw = str(v or "").strip().upper()
-    if raw in {"T", "TRUE", "Y", "YES", "1"}:
-        return true_label
-    if raw in {"F", "FALSE", "N", "NO", "0"}:
-        return false_label
-    return "-"
 
 
 def _as_dt(v):
@@ -117,190 +103,442 @@ def _as_dt(v):
         return None
 
 
-def _watch_status(row, now):
-    if not bool(row.get("hero_watch")):
-        return "-"
-    start = _as_dt(row.get("launch_at"))
-    close = _as_dt(row.get("close_48h_at"))
-    if not start:
-        return "출시시각 필요"
-    if start > now:
-        return "대기"
-    if close and now <= close:
-        hours = max(0, (close - now).total_seconds() / 3600)
-        return f"진행중 · {hours:.1f}H 남음"
-    return "48H 완료"
+def _yn_flag(v, true_label, false_label):
+    raw = str(v or "").strip().upper()
+    if raw in {"T", "TRUE", "Y", "YES", "1"}:
+        return true_label
+    if raw in {"F", "FALSE", "N", "NO", "0"}:
+        return false_label
+    return "-"
 
 
-def page_radar():
-    st.title("히로 레이더")
-    st.caption("신상품의 초기 판매반응을 분석해 더 밀어야 할 상품과 보완해야 할 상품을 알려드립니다. · 공식 데이터: Cafe24 Analytics")
-    launches = current_launches(only_observed=True)
-    actions = action_df()
+def _hours_elapsed(launch_at):
+    dt = _as_dt(launch_at)
+    if not dt:
+        return 0.0
+    now = datetime.now(KST).replace(tzinfo=None)
+    return max(0.0, (now - dt).total_seconds() / 3600)
 
-    if launches.empty:
-        st.info("아직 출시상품 데이터가 없습니다. 상품 스케줄 또는 기존 MD 엑셀을 먼저 등록하세요.")
+
+def _build_diagnosis_rows(data: pd.DataFrame):
+    history = three_year_history_benchmark()
+    rows = []
+    for _, r in data.iterrows():
+        payload = r.to_dict()
+        result = diagnose_with_why(payload, history)
+        payload["_diagnosis_live"] = result["diagnosis"]
+        payload["_why_live"] = result["why"]
+        payload["_action_live"] = result["recommended_action"]
+        rows.append(payload)
+    return pd.DataFrame(rows)
+
+
+def page_explore():
+    st.title("상품 탐색")
+    st.caption(
+        "신상품은 Cafe24 API와 홈페이지 노출을 교차 확인해 자동 등록합니다. "
+        "등록 후 48시간 동안 Cafe24 Analytics로 실제 판매반응을 관찰합니다."
+    )
+
+    data = exploration_launches()
+    if data.empty:
+        st.info(
+            "현재 48시간 탐색 중인 신상품이 없습니다. "
+            "자동탐색은 GitHub Actions에서 주기적으로 실행되며, 관리자 메뉴에서 즉시 실행할 수도 있습니다."
+        )
         return
 
-    now = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None)
-    launch_dt = pd.to_datetime(launches["launch_at"])
-    close_dt = pd.to_datetime(launches["close_48h_at"])
-    active = launches[(launch_dt <= now) & (close_dt >= now)]
-    hero = active[active["hero_score"].fillna(0) >= 85]
-    hidden = active[active["diagnosis"].fillna("").str.contains("숨은", na=False)]
-    conversion = active[active["diagnosis"].fillna("").str.contains("전환|이탈", na=False)]
-    open_actions = actions[actions["status"] != "완료"] if not actions.empty else actions
+    data = _build_diagnosis_rows(data)
+    data["경과시간"] = data["launch_at"].apply(lambda x: f"{_hours_elapsed(x):.1f}H")
+    data["남은시간"] = data["close_48h_at"].apply(
+        lambda x: f"{max(0, (_as_dt(x) - datetime.now(KST).replace(tzinfo=None)).total_seconds()/3600):.1f}H"
+        if _as_dt(x) else "-"
+    )
+    data["구매전환율(CVR)"] = data["cvr"].apply(_pct)
+    data["조회당 매출(RPV)"] = data["rpv"].apply(_money)
+    data["장바구니율"] = data["cart_rate"].apply(_pct)
+    data["히로 점수(HERO Score)"] = pd.to_numeric(data["hero_score"], errors="coerce").round(1)
+    data["자동진단"] = data["_diagnosis_live"]
+    data["추천"] = data["_action_live"]
+    data["탐색경로"] = data["discovery_source"].fillna("수동 등록")
 
-    c1, c2, c3, c4, c5 = st.columns(5)
-    c1.metric("48시간 관찰중", len(active))
-    c2.metric("히로(HERO)", len(hero))
-    c3.metric("숨은 히로(HERO)", len(hidden))
-    c4.metric("전환 문제", len(conversion))
-    c5.metric("미완료 실행", len(open_actions))
-
-    show = launches.copy()
-    show["경과(H)"] = ((now - pd.to_datetime(show["launch_at"])).dt.total_seconds() / 3600).clip(lower=0).round(1)
-    show["48H 상태"] = show.apply(lambda r: _watch_status(r, now.to_pydatetime()), axis=1)
-    show["구매전환율(CVR)"] = show["cvr"].apply(_pct)
-    show["장바구니율"] = show["cart_rate"].apply(_pct)
-    show["조회당 매출(RPV)"] = show["rpv"].apply(_money)
-    show["반품률"] = show["return_rate"].apply(_return_rate) if "return_rate" in show.columns else "-"
-    show["MD 사후판단"] = show["md_followup"].fillna("-") if "md_followup" in show.columns else "-"
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("48시간 탐색중", f"{len(data):,}")
+    m2.metric("HERO/HERO 유력", f"{int((pd.to_numeric(data['hero_score'], errors='coerce').fillna(0) >= 70).sum()):,}")
+    m3.metric("숨은 HERO", f"{int((data['자동진단'] == '숨은 HERO').sum()):,}")
+    m4.metric("전환 문제", f"{int((data['자동진단'] == '전환 문제').sum()):,}")
 
     cols = [
-        "product_name",
-        "경과(H)",
-        "48H 상태",
-        "views",
-        "cart_count",
-        "장바구니율",
-        "order_count",
-        "qty",
-        "revenue",
-        "구매전환율(CVR)",
-        "조회당 매출(RPV)",
-        "반품률",
-        "hero_score",
-        "hero_grade",
-        "MD 사후판단",
-        "diagnosis",
+        "product_name", "경과시간", "남은시간", "views", "cart_count", "장바구니율",
+        "order_count", "qty", "revenue", "구매전환율(CVR)", "조회당 매출(RPV)",
+        "히로 점수(HERO Score)", "hero_grade", "자동진단", "추천", "탐색경로",
     ]
-    cols = [c for c in cols if c in show.columns]
+    cols = [c for c in cols if c in data.columns]
     st.dataframe(
-        show[cols].rename(
+        data[cols].rename(
             columns={
                 "product_name": "상품명",
-                "48H 상태": "48시간 상태",
                 "views": "상품조회수",
                 "cart_count": "장바구니",
                 "order_count": "판매건수",
                 "qty": "판매수량",
                 "revenue": "매출",
-                "hero_score": "히로 점수(HERO Score)",
-                "hero_grade": "히로 등급",
-                "diagnosis": "자동진단",
+                "hero_grade": "상품등급",
             }
         ),
         use_container_width=True,
         hide_index=True,
     )
 
-    st.markdown('<div style="height:1.0rem"></div>', unsafe_allow_html=True)
+    st.subheader("WHY · 왜 이렇게 진단했나요?")
+    labels = {
+        int(r["id"]): f"{r['product_name']} · {r['자동진단']}"
+        for _, r in data.iterrows()
+    }
+    selected = st.selectbox(
+        "상품 선택",
+        list(labels.keys()),
+        format_func=lambda x: labels[x],
+        key="why_explore_select",
+    )
+    row = data[data["id"] == selected].iloc[0]
+    st.markdown(
+        f"""
+        <div class="mso-why">
+          <b>자동진단: {row['자동진단']}</b> · 추천: <b>{row['추천']}</b><br>
+          WHY: {row['_why_live']}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        "WHY는 현재 상품의 상품조회수·구매전환율(CVR)·조회당 매출(RPV)·판매량·매출을 "
+        "최근 비교집단과 대조해 설명합니다. 공식 성과 데이터는 Cafe24 Analytics 하나만 사용합니다."
+    )
 
-    completed = show[pd.to_datetime(show["close_48h_at"]) < now].copy()
-    with st.expander("48시간 이후 MD 사후관리 · 계속 밀지, 보완할지, 종료할지 결정", expanded=False):
-        if completed.empty:
-            st.info("아직 48시간이 완료된 관찰상품이 없습니다.")
+
+def page_judgment_followup():
+    st.title("상품 판정 및 후속업무 관리")
+    st.caption(
+        "상품 탐색에서 48시간이 끝난 상품이 자동으로 이동합니다. "
+        "상품등급과 WHY를 확인하고 MD팀·제작팀 업무를 같은 화면에서 저장해 공유합니다."
+    )
+
+    c1, c2 = st.columns([1, 3])
+    include_ended = c1.checkbox("관찰종료 포함", value=False)
+    status_filter = c2.selectbox(
+        "판정 필터",
+        ["전체", "미정", "확대", "유지관찰", "보완", "중단", "관찰종료"],
+    )
+
+    data = judgment_launches(include_ended=include_ended)
+    if data.empty:
+        st.info("아직 48시간이 완료된 상품이 없습니다.")
+        return
+
+    if status_filter != "전체":
+        if status_filter == "미정":
+            data = data[data["md_followup"].fillna("") == ""].copy()
         else:
-            completed = completed.sort_values("close_48h_at", ascending=False)
-            follow_labels = {
-                int(r["id"]): f"{r['product_name']} · 현재 판단: {r.get('md_followup') or '미정'}"
-                for _, r in completed.iterrows()
-            }
-            launch_id = st.selectbox(
-                "판단할 상품",
-                list(follow_labels.keys()),
-                format_func=lambda x: follow_labels.get(x, str(x)),
-                key="post48h_launch",
+            data = data[data["md_followup"].fillna("") == status_filter].copy()
+    if data.empty:
+        st.info("선택한 조건에 해당하는 상품이 없습니다.")
+        return
+
+    data = _build_diagnosis_rows(data)
+    data["반품률"] = data["return_rate"].apply(_return_rate)
+    data["상품등급"] = data["hero_grade"].fillna("-")
+    data["자동진단"] = data["_diagnosis_live"] + " · " + data["_action_live"]
+    data["WHY"] = data["_why_live"]
+    data["MD팀업무"] = data["md_team_work"].fillna("")
+    data["제작팀업무"] = data["production_team_work"].fillna("")
+    data["기타 메모"] = data["other_note"].fillna("")
+    data["판정"] = data["md_followup"].fillna("미정")
+
+    # 팀 협의안의 판정표 항목을 그대로 중심에 둔다.
+    display_cols = [
+        "product_name", "반품률", "상품등급", "자동진단", "WHY",
+        "판정", "MD팀업무", "제작팀업무", "기타 메모",
+    ]
+    st.dataframe(
+        data[display_cols].rename(columns={"product_name": "상품명"}),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    st.subheader("공유 후속업무 작성")
+    label_map = {
+        int(r["id"]): f"{r['product_name']} · {r['상품등급']} · 현재 판정: {r['판정']}"
+        for _, r in data.iterrows()
+    }
+    launch_id = st.selectbox(
+        "업무를 작성할 상품",
+        list(label_map.keys()),
+        format_func=lambda x: label_map[x],
+    )
+    chosen = data[data["id"] == launch_id].iloc[0]
+
+    st.markdown(
+        f"""
+        <div class="mso-why">
+          <b>WHY</b> · {chosen['_why_live']}<br>
+          <b>자동진단</b> · {chosen['_diagnosis_live']} / 추천: {chosen['_action_live']}
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    decisions = ["미정", "확대", "유지관찰", "보완", "중단", "관찰종료"]
+    current = str(chosen.get("md_followup") or "미정")
+    idx = decisions.index(current) if current in decisions else 0
+
+    with st.form(f"shared_followup_{launch_id}"):
+        decision = st.selectbox("상품 판정", decisions, index=idx)
+        a, b = st.columns(2)
+        md_work = a.text_area(
+            "MD팀업무",
+            value=str(chosen.get("md_team_work") or ""),
+            placeholder="예: 메인 노출 확대 / 가격 검토 / 재주문 확인",
+            height=120,
+        )
+        production_work = b.text_area(
+            "제작팀업무",
+            value=str(chosen.get("production_team_work") or ""),
+            placeholder="예: 추가 생산 가능수량 확인 / 원단·납기 확인",
+            height=120,
+        )
+        other_note = st.text_area(
+            "기타 메모",
+            value=str(chosen.get("other_note") or ""),
+            placeholder="여러 팀이 함께 참고할 내용",
+            height=90,
+        )
+        submitted = st.form_submit_button("판정 및 후속업무 저장", type="primary", use_container_width=True)
+        if submitted:
+            save_judgment_workflow(
+                int(launch_id),
+                decision,
+                md_team_work=md_work,
+                production_team_work=production_work,
+                other_note=other_note,
             )
-            chosen = completed[completed["id"].astype(int) == int(launch_id)].iloc[0]
-            current_decision = str(chosen.get("md_followup") or "").strip()
-            decisions = ["확대", "유지관찰", "보완", "중단", "관찰종료"]
-            default_idx = decisions.index(current_decision) if current_decision in decisions else 1
+            st.success("상품 판정과 공유 후속업무를 저장했습니다.")
+            st.rerun()
 
-            st.caption(
-                "확대: 집중판매 · 유지관찰: 더 지켜봄 · 보완: 상세/가격/콘텐츠 수정 · "
-                "중단: 추가 노출 우선순위 제외 · 관찰종료: 레이더에서 숨김(기록은 보존)"
-            )
-            with st.form(f"post48h_form_{launch_id}"):
-                decision = st.selectbox("MD 판단", decisions, index=default_idx)
-                note = st.text_area(
-                    "판단 메모",
-                    value=str(chosen.get("md_followup_note") or ""),
-                    placeholder="예: 전환은 좋지만 반품률 확인 후 광고 확대 예정",
-                    height=90,
-                )
-                saved = st.form_submit_button("사후판단 저장", type="primary", use_container_width=True)
-                if saved:
-                    save_post48h_followup(int(launch_id), decision, note)
-                    if decision == "관찰종료":
-                        st.success("관찰종료 처리했습니다. 레이더에서는 숨겨지고 과거 데이터와 판단 이력은 보존됩니다.")
-                    else:
-                        st.success(f"MD 판단을 '{decision}'로 저장했습니다.")
-                    st.rerun()
-
-    ended = ended_followups(20)
-    if not ended.empty:
-        with st.expander("관찰 종료 이력 · 최근 20건", expanded=False):
-            st.dataframe(
-                ended[[c for c in ["product_name", "close_48h_at", "md_followup", "md_followup_note", "md_owner"] if c in ended.columns]].rename(
-                    columns={
-                        "product_name": "상품명",
-                        "close_48h_at": "48시간 마감",
-                        "md_followup": "최종 판단",
-                        "md_followup_note": "판단 메모",
-                        "md_owner": "MD 담당",
-                    }
-                ),
-                use_container_width=True,
-                hide_index=True,
-            )
-            st.caption("다시 관찰하려면 상품 마스터에서 해당 상품의 HERO 관찰을 ON으로 저장하세요.")
-
-    _hero_os_guide()
+    with st.expander("48시간 상세 성과 보기", expanded=False):
+        detail_cols = [
+            "product_name", "views", "cart_count", "cart_rate",
+            "order_count", "qty", "revenue", "cvr", "rpv", "return_rate", "hero_score",
+        ]
+        detail = data[detail_cols].copy()
+        detail["cart_rate"] = detail["cart_rate"].apply(_pct)
+        detail["cvr"] = detail["cvr"].apply(_pct)
+        detail["rpv"] = detail["rpv"].apply(_money)
+        detail["return_rate"] = detail["return_rate"].apply(_return_rate)
+        detail["revenue"] = detail["revenue"].apply(_money)
+        st.dataframe(
+            detail.rename(
+                columns={
+                    "product_name": "상품명",
+                    "views": "상품조회수",
+                    "cart_count": "장바구니",
+                    "cart_rate": "장바구니율",
+                    "order_count": "판매건수",
+                    "qty": "판매수량",
+                    "revenue": "매출",
+                    "cvr": "구매전환율(CVR)",
+                    "rpv": "조회당 매출(RPV)",
+                    "return_rate": "반품률",
+                    "hero_score": "히로 점수(HERO Score)",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+        )
 
 
-def page_product_master():
-    st.title("상품 마스터")
-    st.caption("Cafe24 상품정보와 MD 운영정보를 분리 관리하고, 관찰상품을 48시간 판정으로 자동 연결합니다.")
+def page_misharp_dna():
+    """최근 3년 성과에서 시기별 잘 팔린 상품의 공통점을 뽑아 다음 신상 기획 가이드로 변환한다."""
+    from collections import Counter
+    import re
 
-    today = datetime.now(ZoneInfo("Asia/Seoul")).date()
+    st.title("미샵 DNA")
+    st.caption(
+        "최근 3년의 실제 판매성과에서 시기별 잘 팔린 상품의 공통점을 추출해 다음 신상품 기획에 참고할 가이드를 제안합니다. "
+        "3년 이전 상품은 회사 상품DB에는 남지만 DNA 분석에는 사용하지 않습니다."
+    )
+
+    summary = history_summary()
+    if summary.empty or int(summary.iloc[0].get("rows_count") or 0) == 0:
+        st.info(
+            "아직 미샵 DNA 학습데이터가 없습니다. 먼저 데이터·설정의 '최근 3년 비교데이터'에서 지난달 시험수집을 실행하거나 "
+            "GitHub Actions의 36개월 히스토리 backfill을 실행해주세요."
+        )
+        return
+
+    srow = summary.iloc[0]
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("학습 상품", f"{int(srow.get('product_count') or 0):,}개")
+    c2.metric("월별 성과행", f"{int(srow.get('rows_count') or 0):,}개")
+    c3.metric("데이터 시작", str(srow.get("first_month") or "-"))
+    c4.metric("최근 데이터", str(srow.get("last_month") or "-"))
+
+    st.subheader("1. 분석할 시기와 성공 기준")
+    a, b = st.columns([1, 1.4])
+    period_label = a.selectbox(
+        "분석 기간",
+        ["최근 3개월", "최근 6개월", "최근 12개월", "최근 24개월", "최근 36개월"],
+        index=2,
+        help="패션 트렌드 변화를 반영하기 위해 최대 최근 3년까지만 봅니다.",
+    )
+    months = {"최근 3개월": 3, "최근 6개월": 6, "최근 12개월": 12, "최근 24개월": 24, "최근 36개월": 36}[period_label]
+    metric_label = b.selectbox(
+        "잘 팔린 상품 기준",
+        ["매출", "판매수량", "구매전환율(CVR)", "조회당 매출(RPV)"],
+        index=0,
+        help="한 가지 지표만 절대기준으로 쓰지 않고, 선택한 지표 상위상품에서 공통 특성을 찾습니다.",
+    )
+    metric_col = {"매출": "revenue", "판매수량": "qty", "구매전환율(CVR)": "cvr", "조회당 매출(RPV)": "rpv"}[metric_label]
+
+    data = dna_history_dataset(months)
+    if data.empty:
+        st.warning("선택한 기간에 분석 가능한 최근 3년 성과데이터가 없습니다.")
+        return
+
+    # 최소한의 유효 반응이 있는 상품만 비교한다.
+    eligible = data[(data["views"] > 0) | (data["qty"] > 0) | (data["revenue"] > 0)].copy()
+    if eligible.empty:
+        st.warning("선택 기간에 유효한 상품성과가 없습니다.")
+        return
+
+    top_n = min(30, max(10, int(round(len(eligible) * 0.20))))
+    winners = eligible.sort_values([metric_col, "revenue", "qty"], ascending=False).head(top_n).copy()
+
+    def price_band(v):
+        try:
+            x = float(v or 0)
+        except Exception:
+            x = 0
+        if x <= 0: return "가격정보 없음"
+        if x < 30000: return "3만원 미만"
+        if x < 40000: return "3만원대"
+        if x < 50000: return "4만원대"
+        if x < 70000: return "5~6만원대"
+        if x < 100000: return "7~9만원대"
+        return "10만원 이상"
+
+    winners["가격대"] = winners["selling_price"].apply(price_band)
+    cats = [str(x).strip() for x in winners.get("category", pd.Series(dtype=str)).tolist() if str(x).strip() and str(x).lower() not in {"none", "nan"}]
+    top_categories = Counter(cats).most_common(5)
+    top_price = Counter(winners["가격대"].tolist()).most_common(4)
+
+    stopwords = {
+        "color","colors","컬러","미샵","기획","단독","세일","특가","free","size","사이즈",
+        "티셔츠","블라우스","팬츠","원피스","니트","셔츠","자켓","재킷","스커트","가디건",
+        "반팔","긴팔","여성","데일리","the","and","with"
+    }
+    tokens = []
+    for name in winners["product_name"].fillna("").astype(str):
+        for t in re.findall(r"[가-힣A-Za-z0-9]+", name):
+            k = t.strip().lower()
+            if len(k) >= 2 and k not in stopwords and not k.isdigit():
+                tokens.append(k)
+    top_keywords = Counter(tokens).most_common(8)
+
+    st.subheader("2. 이 시기 잘 팔린 상품의 공통점")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("상위 분석상품", f"{len(winners):,}개")
+    m2.metric("상위상품 평균 구매전환율(CVR)", _pct(winners["cvr"].mean()))
+    m3.metric("상위상품 평균 조회당 매출(RPV)", _money(winners["rpv"].mean()))
+    m4.metric("상위상품 평균 판매가", _money(winners.loc[winners["selling_price"] > 0, "selling_price"].mean() if (winners["selling_price"] > 0).any() else 0))
+
+    g1, g2, g3 = st.columns(3)
+    with g1:
+        st.markdown("**강한 카테고리**")
+        if top_categories:
+            for name, cnt in top_categories:
+                st.write(f"• {name} · {cnt}개")
+        else:
+            st.write("카테고리 데이터 보강 필요")
+    with g2:
+        st.markdown("**반응 좋은 가격대**")
+        for name, cnt in top_price:
+            st.write(f"• {name} · {cnt}개")
+    with g3:
+        st.markdown("**상품명에서 반복되는 핵심어**")
+        if top_keywords:
+            st.write(" · ".join([f"{k}({v})" for k, v in top_keywords]))
+        else:
+            st.write("반복 키워드가 충분하지 않습니다.")
+
+    st.subheader("3. 다음 신상 기획 가이드")
+    cat_text = top_categories[0][0] if top_categories else "상위 반응 카테고리"
+    price_text = top_price[0][0] if top_price else "상위 반응 가격대"
+    kw_text = ", ".join([k for k, _ in top_keywords[:4]]) if top_keywords else "상품명·핏·소재 키워드"
+    median_cvr = float(winners["cvr"].median() or 0)
+    median_rpv = float(winners["rpv"].median() or 0)
+    median_views = float(winners["views"].median() or 0)
+
+    st.markdown(
+        f"""
+        <div class="mso-why">
+        <b>미샵 DNA 제안</b><br>
+        • <b>우선 검토 영역:</b> {html_escape(cat_text)} 계열과 <b>{html_escape(price_text)}</b> 가격대를 다음 신상 후보군에서 우선 비교해보세요.<br>
+        • <b>반복 신호:</b> 상위상품에서 <b>{html_escape(kw_text)}</b> 같은 표현이 반복됩니다. 실제 기획에서는 단어 자체보다 그 단어가 가리키는 핏·소재·착용상황을 확인하세요.<br>
+        • <b>출시 후 초기 기대선:</b> 상위상품 중앙값 기준 상품조회수 약 <b>{median_views:,.0f}</b>, 구매전환율(CVR) <b>{median_cvr*100:.2f}%</b>, 조회당 매출(RPV) <b>{median_rpv:,.0f}원</b>입니다.<br>
+        • <b>활용 원칙:</b> 이 가이드는 '이 디자인을 그대로 만들라'는 답이 아니라, MD가 다음 신상을 고를 때 <b>무엇을 먼저 확인할지 알려주는 데이터 근거</b>입니다. 현재 트렌드·고객반응·현장 MD 판단과 함께 사용하세요.
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    st.subheader("4. 근거가 된 상위상품")
+    show = winners[["product_name", "category", "selling_price", "views", "cart_count", "qty", "revenue", "cvr", "rpv"]].copy()
+    show["판매가"] = show["selling_price"].apply(_money)
+    show["구매전환율(CVR)"] = show["cvr"].apply(_pct)
+    show["조회당 매출(RPV)"] = show["rpv"].apply(_money)
+    show["매출"] = show["revenue"].apply(_money)
+    show = show.rename(columns={"product_name":"상품명", "category":"카테고리", "views":"상품조회수", "cart_count":"장바구니", "qty":"판매수량"})
+    st.dataframe(
+        show[["상품명", "카테고리", "판매가", "상품조회수", "장바구니", "판매수량", "매출", "구매전환율(CVR)", "조회당 매출(RPV)"]],
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    with st.expander("미샵 DNA를 어떻게 해석하나요?"):
+        st.markdown(
+            """
+            - **최근 3년만 사용**: 오래된 유행이 현재 기획에 과도하게 영향을 주지 않도록 합니다.
+            - **기간을 바꿔 비교**: 최근 3개월은 현재 트렌드, 12개월은 계절을 포함한 안정적 패턴, 36개월은 반복되는 미샵 고객 DNA를 보는 데 유리합니다.
+            - **매출만 보지 않기**: 매출·판매수량·구매전환율(CVR)·조회당 매출(RPV)을 각각 바꿔보면 '많이 노출된 상품'과 '상품력이 강한 상품'을 구분할 수 있습니다.
+            - **공통점은 가설**: 자동 추출된 공통점은 다음 상품 기획의 질문을 만드는 자료입니다. 최종 상품선정은 현재 트렌드, 원가, 공급조건, 고객 VOC와 함께 판단합니다.
+            """
+        )
+
+def page_product_db():
+    st.title("상품DB")
+    st.caption("Cafe24 전체 상품DB와 운영정보를 한 곳에서 확인·관리합니다.")
+
+    today = datetime.now(KST).date()
     filter_values = product_master_filter_values()
 
-    # 기간 성과 범위
-    d1, d2 = st.columns(2)
-    start_date = d1.date_input("통계 시작일", today - timedelta(days=6), key="pm_start")
-    end_date = d2.date_input("통계 종료일", today, key="pm_end")
+    f1, f2, f3, f4 = st.columns([2.3, 1, 1, 1])
+    search = f1.text_input("상품 검색", placeholder="상품명 / 상품코드 / 상품번호")
+    selling_label = f2.selectbox("판매상태", ["전체", "판매중", "판매중지"])
+    display_label = f3.selectbox("진열상태", ["전체", "진열", "미진열"])
+    watch_label = f4.selectbox("상품 탐색", ["전체", "탐색 ON", "탐색 OFF"])
 
-    # 1차 필터
-    f1, f2, f3, f4 = st.columns([2.2, 1, 1, 1])
-    search = f1.text_input("상품 검색", placeholder="상품명 / 상품코드 / 상품번호", key="pm_search")
-    selling_label = f2.selectbox("판매상태", ["전체", "판매중", "판매중지"], key="pm_selling")
-    display_label = f3.selectbox("진열상태", ["전체", "진열", "미진열"], key="pm_display")
-    watch_label = f4.selectbox("HERO 관찰", ["전체", "관찰 ON", "관찰 OFF"], key="pm_watch")
-
-    # 2차 필터
-    f5, f6, f7, f8 = st.columns([1.5, 1.2, 1.2, 0.8])
-    category = f5.selectbox("카테고리", ["전체"] + filter_values.get("categories", []), key="pm_category")
-    season = f6.selectbox("시즌", ["전체"] + filter_values.get("seasons", []), key="pm_season")
-    sourcing = f7.selectbox("제작/사입", ["전체"] + filter_values.get("sourcing_types", []), key="pm_sourcing")
-    page_size = f8.selectbox("표시수", [50, 100, 200], index=1, key="pm_page_size")
+    f5, f6, f7, f8 = st.columns([1.5, 1.2, 1.2, .8])
+    category = f5.selectbox("카테고리", ["전체"] + filter_values.get("categories", []))
+    season = f6.selectbox("시즌", ["전체"] + filter_values.get("seasons", []))
+    sourcing = f7.selectbox("제작/사입", ["전체"] + filter_values.get("sourcing_types", []))
+    page_size = f8.selectbox("표시수", [50, 100, 200], index=1)
 
     filters = {
         "search": search,
         "selling": {"전체": None, "판매중": "T", "판매중지": "F"}[selling_label],
         "display": {"전체": None, "진열": "T", "미진열": "F"}[display_label],
-        "hero_watch": {"전체": None, "관찰 ON": True, "관찰 OFF": False}[watch_label],
+        "hero_watch": {"전체": None, "탐색 ON": True, "탐색 OFF": False}[watch_label],
         "category": None if category == "전체" else category,
         "season": None if season == "전체" else season,
         "sourcing_type": None if sourcing == "전체" else sourcing,
@@ -310,422 +548,153 @@ def page_product_master():
     filtered_total = count_product_master(filters)
     watch_total = count_hero_watch()
     page_count = max(1, math.ceil(filtered_total / int(page_size)))
-    if st.session_state.get("pm_page", 1) > page_count:
-        st.session_state["pm_page"] = page_count
-    if "pm_page" not in st.session_state:
-        st.session_state["pm_page"] = 1
+    if "product_db_page" not in st.session_state:
+        st.session_state["product_db_page"] = 1
+    st.session_state["product_db_page"] = min(st.session_state["product_db_page"], page_count)
 
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Cafe24 전체 상품", f"{total:,}")
+    m1.metric("전체 상품DB", f"{total:,}")
     m2.metric("현재 조건", f"{filtered_total:,}")
-    m3.metric("HERO 관찰 ON", f"{watch_total:,}")
-    m4.metric("페이지", f"{st.session_state['pm_page']} / {page_count}")
+    m3.metric("상품 탐색 ON", f"{watch_total:,}")
+    m4.metric("페이지", f"{st.session_state['product_db_page']} / {page_count}")
 
-    p1, p2, p3 = st.columns([1, 1, 4])
-    if p1.button("◀ 이전", disabled=st.session_state["pm_page"] <= 1, use_container_width=True):
-        st.session_state["pm_page"] -= 1
+    b1, b2, _ = st.columns([1, 1, 4])
+    if b1.button("◀ 이전", disabled=st.session_state["product_db_page"] <= 1, use_container_width=True):
+        st.session_state["product_db_page"] -= 1
         st.rerun()
-    if p2.button("다음 ▶", disabled=st.session_state["pm_page"] >= page_count, use_container_width=True):
-        st.session_state["pm_page"] += 1
+    if b2.button("다음 ▶", disabled=st.session_state["product_db_page"] >= page_count, use_container_width=True):
+        st.session_state["product_db_page"] += 1
         st.rerun()
-    page = int(st.session_state["pm_page"])
 
     data = product_master_page(
-        start_date.isoformat(),
-        end_date.isoformat(),
+        (today - timedelta(days=6)).isoformat(),
+        today.isoformat(),
         filters=filters,
-        page=page,
+        page=int(st.session_state["product_db_page"]),
         page_size=int(page_size),
     )
     if data.empty:
         st.info("조건에 맞는 상품이 없습니다.")
         return
 
-    # 없는 지표 컬럼 기본값
-    for c in ["views", "cart_count", "order_count", "qty", "revenue", "sellmate_stock_qty"]:
-        if c not in data.columns:
-            data[c] = 0
-    for c in ["cvr", "cart_rate", "rpv"]:
-        if c not in data.columns:
-            data[c] = 0.0
-
-    now = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
     data["판매상태"] = data["selling"].apply(lambda v: _yn_flag(v, "판매중", "판매중지"))
     data["진열상태"] = data["display"].apply(lambda v: _yn_flag(v, "진열", "미진열"))
-    data["HERO 관찰"] = data["hero_watch"].apply(lambda v: "ON" if bool(v) else "OFF")
-    data["48H 상태"] = data.apply(lambda r: _watch_status(r, now), axis=1)
+    data["상품 탐색"] = data["hero_watch"].apply(lambda v: "ON" if bool(v) else "OFF")
     data["판매가"] = data["selling_price"].apply(_money)
-    data["소비자가"] = data["retail_price"].apply(_money) if "retail_price" in data else "-"
-    data["반품률"] = data["return_rate"].apply(_return_rate) if "return_rate" in data.columns else "-"
-    data["구매전환율(CVR)"] = data["cvr"].apply(_pct)
-    data["장바구니율"] = data["cart_rate"].apply(_pct)
-    data["조회당 매출(RPV)"] = data["rpv"].apply(_money)
+    if "auto_discovered" not in data.columns:
+        data["auto_discovered"] = False
+    if "discovery_source" not in data.columns:
+        data["discovery_source"] = None
 
-    tab1, tab2 = st.tabs(["운영 마스터", "기간 성과"])
-    with tab1:
-        master_cols = [
-            "product_no", "product_code", "product_name", "판매가", "소비자가",
-            "판매상태", "진열상태", "category", "sourcing_type", "season",
-            "HERO 관찰", "launch_at", "48H 상태", "hero_score", "hero_grade",
-            "반품률", "md_owner",
-        ]
-        master_cols = [c for c in master_cols if c in data.columns]
-        st.dataframe(
-            data[master_cols].rename(columns={
+    master_cols = [
+        "product_no", "product_code", "product_name", "판매가", "판매상태", "진열상태",
+        "category", "상품 탐색", "launch_at", "auto_discovered", "discovery_source",
+        "season", "sourcing_type", "md_owner",
+    ]
+    master_cols = [c for c in master_cols if c in data.columns]
+    st.dataframe(
+        data[master_cols].rename(
+            columns={
                 "product_no": "상품번호",
                 "product_code": "상품코드",
                 "product_name": "상품명",
                 "category": "카테고리",
-                "sourcing_type": "제작/사입",
+                "launch_at": "탐색 시작시각",
+                "auto_discovered": "자동탐색",
+                "discovery_source": "탐색경로",
                 "season": "시즌",
-                "launch_at": "출시시각",
-                "48H 상태": "48시간 상태",
-                "hero_score": "히로 점수(HERO Score)",
-                "hero_grade": "히로 등급",
+                "sourcing_type": "제작/사입",
                 "md_owner": "MD 담당",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    with tab2:
-        perf_cols = [
-            "product_no", "product_name", "views", "cart_count", "장바구니율",
-            "order_count", "qty", "revenue", "구매전환율(CVR)", "조회당 매출(RPV)", "반품률",
-        ]
-        perf_cols = [c for c in perf_cols if c in data.columns]
-        st.dataframe(
-            data[perf_cols].rename(columns={
-                "product_no": "상품번호",
-                "product_name": "상품명",
-                "views": "상품조회수",
-                "cart_count": "장바구니",
-                "order_count": "판매건수",
-                "qty": "판매수량",
-                "revenue": "매출",
-            }),
-            use_container_width=True,
-            hide_index=True,
-        )
+            }
+        ),
+        use_container_width=True,
+        hide_index=True,
+    )
 
     st.divider()
-    st.subheader("MD 운영정보 수정")
-    st.caption("여기서 저장한 값은 Cafe24 재동기화와 분리됩니다. HERO 관찰 ON + 출시시각 저장 시 48H 관찰건이 자동 생성됩니다.")
-
+    st.subheader("상품 운영정보 수정")
     choices = data[["product_no", "product_name"]].fillna("").to_dict("records")
     labels = {str(x["product_no"]): f"{x['product_no']} · {x['product_name']}" for x in choices}
     selected_no = st.selectbox(
         "수정할 상품",
         list(labels.keys()),
-        format_func=lambda x: labels.get(x, x),
-        key="pm_edit_product",
+        format_func=lambda x: labels[x],
     )
+
     md = get_product_md(selected_no)
     selected_row = data[data["product_no"].astype(str) == str(selected_no)].iloc[0]
+    now = datetime.now(KST).replace(tzinfo=None)
     launch_dt = _as_dt(md.get("launch_at")) or _as_dt(selected_row.get("launch_at")) or now
     sale_end_dt = _as_dt(md.get("sale_end_at"))
 
-    existing_season = str(md.get("season") or "").strip()
     season_options = ["", "봄", "여름", "간절기", "가을", "겨울", "사계절", "기타"]
+    existing_season = str(md.get("season") or "")
     if existing_season and existing_season not in season_options:
         season_options.insert(1, existing_season)
 
-    existing_source = str(md.get("sourcing_type") or "").strip()
     source_options = ["", "미샵제작", "사입", "기타"]
+    existing_source = str(md.get("sourcing_type") or "")
     if existing_source and existing_source not in source_options:
         source_options.insert(1, existing_source)
 
-    with st.form(f"pm_md_form_{selected_no}"):
+    with st.form(f"product_db_edit_{selected_no}"):
         a1, a2, a3 = st.columns(3)
-        hero_watch = a1.checkbox("HERO 관찰 ON", value=bool(md.get("hero_watch", False)))
+        watch = a1.checkbox("상품 탐색 ON", value=bool(md.get("hero_watch", False)))
         season_value = a2.selectbox(
-            "시즌",
-            season_options,
+            "시즌", season_options,
             index=season_options.index(existing_season) if existing_season in season_options else 0,
         )
         source_value = a3.selectbox(
-            "제작/사입",
-            source_options,
+            "제작/사입", source_options,
             index=source_options.index(existing_source) if existing_source in source_options else 0,
         )
 
         b1, b2, b3 = st.columns([1, 1, 1.2])
-        launch_date = b1.date_input("출시일", launch_dt.date())
-        launch_time = b2.time_input("출시시각", launch_dt.time().replace(microsecond=0))
-        md_owner = b3.text_input("MD 담당", value=str(md.get("md_owner") or ""))
+        launch_date = b1.date_input("실제 노출일", launch_dt.date())
+        launch_time = b2.time_input("실제 노출시각", launch_dt.time().replace(microsecond=0))
+        owner = b3.text_input("MD 담당", value=str(md.get("md_owner") or ""))
 
         c1, c2 = st.columns([1, 2])
         has_end = c1.checkbox("판매종료일 사용", value=bool(sale_end_dt))
-        end_date_value = c1.date_input("판매종료일", sale_end_dt.date() if sale_end_dt else today, disabled=not has_end)
-        md_note = c2.text_area("MD 메모", value=str(md.get("md_note") or ""), height=100)
+        end_date = c1.date_input(
+            "판매종료일",
+            sale_end_dt.date() if sale_end_dt else today,
+            disabled=not has_end,
+        )
+        note = c2.text_area("관리자 메모", value=str(md.get("md_note") or ""), height=95)
 
         submitted = st.form_submit_button("운영정보 저장", type="primary", use_container_width=True)
         if submitted:
             launch_at = datetime.combine(launch_date, launch_time)
-            sale_end_at = datetime.combine(end_date_value, datetime.max.time()).replace(microsecond=0) if has_end else None
-            result = save_product_md(
+            sale_end_at = (
+                datetime.combine(end_date, datetime.max.time()).replace(microsecond=0)
+                if has_end else None
+            )
+            save_product_md(
                 selected_no,
                 {
-                    "hero_watch": hero_watch,
+                    "hero_watch": watch,
                     "launch_at": launch_at,
                     "sale_end_at": sale_end_at,
                     "season": season_value or None,
                     "sourcing_type": source_value or None,
-                    "md_owner": md_owner.strip() or None,
-                    "md_note": md_note.strip() or None,
+                    "md_owner": owner.strip() or None,
+                    "md_note": note.strip() or None,
                 },
             )
-            if hero_watch:
-                # 신규 HERO 관찰상품은 저장 직후 첫 Analytics 데이터를 즉시 수집합니다.
-                # 이후 갱신은 GitHub Actions가 30분 간격으로 이어서 수행합니다.
+            if watch:
                 try:
-                    with st.spinner("첫 판매반응 데이터를 불러오는 중입니다..."):
-                        immediate_count = sync_launch_metrics(product_no=selected_no)
-                    if immediate_count:
-                        st.toast("HERO 관찰 등록 · 첫 데이터까지 바로 갱신했습니다.", icon="✅")
-                    else:
-                        st.toast("HERO 관찰 등록 완료 · 출시 전 상품은 출시 후 자동 수집됩니다.", icon="✅")
+                    with st.spinner("첫 판매반응 데이터를 즉시 불러오는 중..."):
+                        sync_launch_metrics(product_no=selected_no)
                 except Exception as e:
-                    # 운영정보 저장 자체는 성공 상태로 유지하고, 수집 실패만 안내합니다.
-                    st.warning(f"HERO 관찰 등록은 완료됐지만 첫 데이터 수집은 잠시 후 자동 재시도됩니다. ({e})")
-            else:
-                st.success("저장 완료 · HERO 관찰 OFF")
+                    st.warning(f"운영정보는 저장됐지만 첫 데이터 수집은 다음 자동수집 때 재시도됩니다. ({e})")
+            st.success("저장했습니다.")
             st.rerun()
-
-    st.info("Cafe24 상품 재동기화는 MD 운영정보를 덮어쓰지 않습니다. 반품률은 주문·반품 데이터 연동 후 자동 표시됩니다.")
-
-
-
-def page_schedule():
-    st.title("상품 스케줄")
-    st.caption("출시 전 집중상품(FOCUS) · 과거 히로 특성(HERO DNA) · MD 평가와 노출일정을 관리합니다.")
-    data = candidate_df()
-    if data.empty:
-        st.info("등록된 후보상품이 없습니다.")
-    else:
-        show = data.copy()
-        if "focus_candidate" in show:
-            show["focus_candidate"] = show["focus_candidate"].map({True: "O", False: "X"})
-        cols = [
-            c
-            for c in [
-                "exposure_plan_at",
-                "supplier_product_name",
-                "supply_price",
-                "tentative_name",
-                "focus_candidate",
-                "hero_dna",
-                "supplier_name",
-                "order_plan_at",
-                "status",
-                "prelaunch_score",
-                "product_no",
-                "cafe24_product_name",
-            ]
-            if c in show.columns
-        ]
-        st.dataframe(
-            show[cols].rename(
-                columns={
-                    "exposure_plan_at": "노출예정",
-                    "supplier_product_name": "공급사상품명",
-                    "supply_price": "공급가",
-                    "tentative_name": "가칭상품명",
-                    "focus_candidate": "집중상품(FOCUS)",
-                    "hero_dna": "과거 히로 특성(HERO DNA)",
-                    "supplier_name": "소싱처",
-                    "order_plan_at": "발주예정",
-                    "status": "상태",
-                    "prelaunch_score": "예상 히로 점수(HERO Score)",
-                    "product_no": "Cafe24 상품번호",
-                    "cafe24_product_name": "Cafe24 상품명",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-
-    st.divider()
-    with st.expander("신상품 후보 추가"):
-        name = st.text_input("공급사상품명")
-        tentative = st.text_input("가칭상품명")
-        exposure = st.date_input("노출예정일")
-        focus = st.checkbox("집중상품(FOCUS) 후보")
-        dna = st.text_input("과거 히로 특성(HERO DNA)")
-        md = st.slider("MD 평가", 0, 100, 50)
-        season = st.slider("시즌 적합도", 0, 100, 50)
-        reorder = st.slider("재주문 가능성", 0, 100, 50)
-        content = st.slider("콘텐츠 확장성", 0, 100, 50)
-        if st.button("후보 추가", type="primary") and name:
-            from misharp_hero.repository import upsert_product, add_candidate
-
-            score = prelaunch_score(
-                focus=focus,
-                md_score=md,
-                season_score=season,
-                reorder_score=reorder,
-                content_score=content,
-            )
-            pid = upsert_product({"supplier_product_name": name, "product_name": tentative or name})
-            add_candidate(
-                {
-                    "product_id": pid,
-                    "supplier_product_name": name,
-                    "tentative_name": tentative,
-                    "exposure_plan_at": datetime.combine(exposure, datetime.min.time()),
-                    "focus_candidate": focus,
-                    "hero_dna": dna,
-                    "md_score": md,
-                    "season_score": season,
-                    "reorder_score": reorder,
-                    "content_score": content,
-                    "prelaunch_score": score,
-                    "status": "후보",
-                }
-            )
-            st.success(f"추가 완료 · 예상 히로 점수(HERO Score) {score}")
-            st.rerun()
-
-
-
-def page_48h():
-    st.title("48시간 판정")
-    st.caption("실제 출시시각부터 정확히 48시간 동안 Cafe24 Analytics를 기준으로 상품 반응을 판정합니다.")
-    data = current_launches()
-    if data.empty:
-        st.info("출시상품이 없습니다.")
-        return
-    show = data.copy()
-    show["48시간 마감"] = pd.to_datetime(show["close_48h_at"])
-    show["구매전환율(CVR)"] = show["cvr"].apply(_pct)
-    show["장바구니율"] = show["cart_rate"].apply(_pct)
-    show["조회당 매출(RPV)"] = show["rpv"].apply(_money)
-    show["반품률"] = show["return_rate"].apply(_return_rate) if "return_rate" in show.columns else "-"
-    show["MD 사후판단"] = show["md_followup"].fillna("-") if "md_followup" in show.columns else "-"
-    cols = [
-        "product_name",
-        "launch_at",
-        "48시간 마감",
-        "views",
-        "cart_count",
-        "장바구니율",
-        "order_count",
-        "qty",
-        "구매전환율(CVR)",
-        "조회당 매출(RPV)",
-        "revenue",
-        "반품률",
-        "hero_score",
-        "hero_grade",
-        "diagnosis",
-        "hero_manual",
-        "MD 사후판단",
-    ]
-    cols = [c for c in cols if c in show.columns]
-    st.dataframe(
-        show[cols].rename(
-            columns={
-                "product_name": "상품명",
-                "launch_at": "출시시각",
-                "views": "상품조회수",
-                "cart_count": "장바구니",
-                "order_count": "판매건수",
-                "qty": "판매수량",
-                "revenue": "매출",
-                "hero_score": "히로 점수(HERO Score)",
-                "hero_grade": "자동 등급",
-                "diagnosis": "자동진단",
-                "hero_manual": "MD 히로(HERO)",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-
-def page_hero_list():
-    st.title("월간 HERO")
-    data = monthly_hero_df()
-    if data.empty:
-        st.info("월간 HERO 데이터가 없습니다.")
-        return
-    months = ["전체"] + sorted(data["month"].dropna().unique().tolist(), reverse=True)
-    m = st.selectbox("월", months)
-    show = data if m == "전체" else data[data["month"] == m]
-    st.dataframe(
-        show.rename(
-            columns={
-                "month": "월",
-                "product_name": "상품명",
-                "supplier_product_name": "공급사상품명",
-                "hero_status": "히로(HERO)",
-                "qty": "판매수량",
-                "revenue": "매출",
-                "margin_rate": "공헌이익률",
-                "gross_profit": "공헌이익액",
-                "keep_status": "유지여부",
-                "revenue_rank": "매출순위",
-                "profit_rank": "이익순위",
-                "margin_rank": "이익률순위",
-                "note": "비고",
-            }
-        ),
-        use_container_width=True,
-        hide_index=True,
-    )
-
-
-
-def page_actions():
-    st.title("MD 실행")
-    data = action_df()
-    if not data.empty:
-        st.dataframe(
-            data.rename(
-                columns={
-                    "product_name": "상품명",
-                    "issue_type": "이슈",
-                    "action_text": "조치",
-                    "owner": "담당",
-                    "due_at": "기한",
-                    "status": "상태",
-                    "team": "팀",
-                    "note": "메모",
-                }
-            ),
-            use_container_width=True,
-            hide_index=True,
-        )
-    st.divider()
-    with st.form("action_add"):
-        product = st.text_input("상품명")
-        issue = st.selectbox("이슈", ["HERO 확대", "숨은 HERO", "전환 문제", "반품", "콘텐츠", "주간회의", "기타"])
-        action = st.text_area("조치내용")
-        owner = st.text_input("담당")
-        team = st.selectbox("팀", ["MD", "제작", "마케팅", "기타"])
-        submitted = st.form_submit_button("실행 추가")
-        if submitted and action:
-            from misharp_hero.repository import add_action
-
-            add_action(
-                {
-                    "product_name": product,
-                    "issue_type": issue,
-                    "action_text": action,
-                    "owner": owner,
-                    "team": team,
-                    "status": "대기",
-                }
-            )
-            st.success("추가했습니다.")
-            st.rerun()
-
 
 
 def page_data_settings():
     st.title("데이터·설정")
-    st.caption("Cafe24 상품과 Cafe24 Analytics를 연결합니다. HERO 판정의 공식 성과 데이터는 Cafe24 Analytics입니다.")
+    st.caption("Cafe24 연결, 자동 신상품 탐색, 48시간 데이터 수집 상태를 관리합니다.")
 
     c1, c2, c3 = st.columns(3)
     c1.metric("DB", "연결" if DATABASE_URL else "미설정")
@@ -733,7 +702,7 @@ def page_data_settings():
     c3.metric("Cafe24 토큰", "저장됨" if load_token("admin") else "없음")
 
     st.subheader("1. Cafe24 OAuth")
-    st.caption("상품 + 주문 + 접속통계 권한을 한 번에 승인합니다. 권장 Scope: mall.read_product mall.read_order mall.read_analytics")
+    st.caption("권장 Scope: mall.read_product mall.read_order mall.read_analytics")
     st.code(CAFE24_SCOPES, language=None)
     if CAFE24_MALL_ID and CAFE24_CLIENT_ID and CAFE24_REDIRECT_URI:
         st.link_button("Cafe24 권한 승인 열기", AdminOAuth().authorize_url())
@@ -747,7 +716,29 @@ def page_data_settings():
                 st.error(str(e))
 
     st.divider()
-    st.subheader("2. 연결 테스트")
+    st.subheader("2. 자동 신상품 탐색")
+    st.caption(
+        "Cafe24 API가 주 기준이며 홈페이지 크롤링은 실제 노출 교차확인용입니다. "
+        "기본 운영은 30분 주기로 탐색해 48시간 시작 오차를 줄입니다."
+    )
+    st.write(f"홈페이지: `{MISHARP_NEW_PRODUCT_URL or MISHARP_HOME_URL}`")
+    if st.button("신상품 탐색 지금 실행", type="primary"):
+        try:
+            with st.spinner("신상품을 확인하고 상품 탐색에 자동 등록하는 중..."):
+                result = discover_new_products()
+                # 방금 자동등록된 상품의 첫 Analytics도 바로 수집
+                sync_launch_metrics()
+            st.success(
+                f"후보 {result['candidates']:,}개 · 신규등록 {result['registered']:,}개 · "
+                f"홈페이지 확인 {result['homepage_seen']:,}개"
+            )
+            if result.get("homepage_error"):
+                st.warning("홈페이지 크롤링은 실패했지만 Cafe24 API 자동탐색은 정상 처리됐습니다.")
+        except Exception as e:
+            st.error(str(e))
+
+    st.divider()
+    st.subheader("3. 연결 테스트")
     t1, t2 = st.columns(2)
     if t1.button("Cafe24 상품 API 테스트"):
         try:
@@ -757,59 +748,76 @@ def page_data_settings():
             st.error(str(e))
     if t2.button("Cafe24 Analytics 테스트"):
         try:
-            end_at = datetime.now(ZoneInfo("Asia/Seoul")).replace(tzinfo=None)
+            end_at = datetime.now(KST).replace(tzinfo=None)
             start_at = end_at - timedelta(hours=24)
             rows = Cafe24AnalyticsClient().product_views(start_at, end_at)
             st.success(f"Analytics 정상 · 상품조회 지표 {len(rows):,}건")
         except Exception as e:
             st.error(str(e))
 
-
     st.divider()
-    st.subheader("3. 수동 동기화")
-    s1, s2, s3 = st.columns(3)
-    if s1.button("Cafe24 상품 전체"):
+    st.subheader("4. 수동 동기화")
+    a, b, c = st.columns(3)
+    if a.button("Cafe24 상품 전체"):
         try:
             with st.spinner("상품 전체 동기화 중..."):
                 count = sync_products_full()
             st.success(f"상품 {count:,}개 동기화")
         except Exception as e:
             st.error(str(e))
-    if s2.button("Cafe24 상품 최근 48H"):
+    if b.button("Cafe24 최근 상품"):
         try:
-            count = sync_products_incremental(48)
-            st.success(f"최근 수정상품 {count:,}개 동기화")
+            count = sync_products_incremental(72)
+            st.success(f"최근 상품 {count:,}개 동기화")
         except Exception as e:
             st.error(str(e))
-    if s3.button("Analytics 최근 2일"):
+    if c.button("Analytics 최근 2일"):
         try:
-            with st.spinner("조회·장바구니·판매 통계 동기화 중..."):
-                count = sync_analytics_days(2)
-            st.success(f"Analytics {count:,}개 상품-일 지표 저장")
-        except Exception as e:
-            st.error(str(e))
-
-
-    r1, r2 = st.columns(2)
-    if r1.button("48시간 HERO 다시 계산", type="primary", use_container_width=True):
-        try:
-            with st.spinner("48H 지표 계산 중..."):
-                count = sync_launch_metrics()
-            st.success(f"48시간 HERO {count:,}개 갱신")
+            count = sync_analytics_days(2)
+            st.success(f"Analytics {count:,}개 상품-일 저장")
         except Exception as e:
             st.error(str(e))
 
-    if r2.button("반품률 갱신", use_container_width=True):
+    d, e = st.columns(2)
+    if d.button("48시간 상품 데이터 갱신", use_container_width=True):
         try:
-            with st.spinner("48시간 완료상품의 반품완료 데이터를 확인하는 중..."):
-                count = sync_return_metrics()
-            st.success(f"반품률 {count:,}개 상품 갱신")
+            count = sync_launch_metrics()
+            st.success(f"48시간 데이터 {count:,}개 갱신")
+        except Exception as e:
+            st.error(str(e))
+    if e.button("반품률 갱신", use_container_width=True):
+        try:
+            count = sync_return_metrics()
+            st.success(f"반품률 {count:,}개 갱신")
         except Exception as e:
             st.error(str(e))
 
     st.divider()
-    st.subheader("4. 기존 MD 엑셀 이관")
-    f = st.file_uploader("미샵 핵심업무 실행서식", type=["xlsx", "xlsm"], key="md")
+    st.subheader("5. 최근 3년 비교데이터")
+    st.caption(
+        "전체 20년 상품DB는 보존하지만 WHY/예측 비교에는 최근 3년만 사용합니다. "
+        "36개월 전체 backfill은 GitHub Actions의 별도 수동 workflow로 실행하도록 분리했습니다."
+    )
+    summary = history_summary()
+    if not summary.empty:
+        r = summary.iloc[0]
+        st.write(
+            f"현재 학습데이터: {int(r.get('product_count') or 0):,}개 상품 / "
+            f"{int(r.get('rows_count') or 0):,}행 / "
+            f"{r.get('first_month') or '-'} ~ {r.get('last_month') or '-'}"
+        )
+    today = datetime.now(KST)
+    prev = today.replace(day=1) - timedelta(days=1)
+    if st.button(f"지난달({prev:%Y-%m}) 1개월 시험수집"):
+        try:
+            count = sync_history_month(prev.year, prev.month, years_back=3)
+            st.success(f"{prev:%Y-%m} · {count:,}개 상품 학습데이터 저장")
+        except Exception as e:
+            st.error(str(e))
+
+    st.divider()
+    st.subheader("6. 기존 MD 엑셀 이관")
+    f = st.file_uploader("미샵 핵심업무 실행서식", type=["xlsx", "xlsm"])
     if f and st.button("MD 엑셀 가져오기"):
         suffix = Path(f.name).suffix
         with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
@@ -820,10 +828,99 @@ def page_data_settings():
 
     st.divider()
     st.subheader("최근 자동수집 로그")
-    logs = sync_status_df(30)
+    logs = sync_status_df(40)
     if logs.empty:
         st.info("동기화 로그가 없습니다.")
     else:
         st.dataframe(logs, use_container_width=True, hide_index=True)
 
-    st.info("HERO 판정의 공식 성과 데이터는 Cafe24 Analytics입니다. 반품률은 최초 48시간 판매분의 실제 반품완료 비율이며 HERO Score에는 넣지 않고 사후 품질판단에 사용합니다.")
+    st.info(
+        "공식 판정 데이터는 Cafe24 Analytics 하나만 사용합니다. "
+        "반품률은 48시간 이후 품질판단에만 사용하며 히로 점수(HERO Score)에는 넣지 않습니다."
+    )
+
+
+def page_guide():
+    st.title("HERO ITEM OS 이용방법")
+    st.caption("이 페이지는 MD팀과 제작팀이 프로그램의 목적과 일일 사용법을 동일하게 이해하기 위한 운영 매뉴얼입니다.")
+
+    st.markdown(
+        """
+        ### 1. 이 프로그램의 목적
+        HERO ITEM OS는 **모든 신상품을 똑같이 밀지 않기 위해** 만든 상품 의사결정 시스템입니다.
+        신상품을 자동으로 발견하고, 출시 후 48시간의 실제 반응을 확인한 뒤,
+        **더 밀 상품 / 보완할 상품 / 중단할 상품**을 빠르게 결정하고 후속업무를 공유합니다.
+
+        ### 2. 전체 흐름
+        **신상품 자동 탐색 → 48시간 관찰 → 상품 판정 → MD/제작 후속업무 → 미샵 DNA → 다음 신상 기획**
+
+        <div class="mso-guide-step">
+        <b>① 상품 탐색</b><br>
+        Cafe24 API를 기준으로 최근 등록·판매중·진열중인 신상품을 자동으로 찾습니다.
+        홈페이지 크롤링은 실제 노출 여부를 교차확인하는 보조 수단입니다.
+        자동 발견된 상품은 별도 등록 없이 48시간 관찰을 시작합니다.
+        </div>
+
+        <div class="mso-guide-step">
+        <b>② 첫 48시간</b><br>
+        상품조회수, 장바구니, 판매건수, 판매수량, 매출,
+        구매전환율(CVR), 조회당 매출(RPV)을 Cafe24 Analytics에서 자동 수집합니다.
+        신규 등록 직후 첫 데이터가 바로 들어오고 이후 30분 단위로 갱신됩니다.
+        </div>
+
+        <div class="mso-guide-step">
+        <b>③ 상품 판정 및 후속업무 관리</b><br>
+        48시간이 끝나면 상품은 자동으로 이 메뉴로 이동합니다.
+        상품등급, 자동진단, WHY, 반품률을 보고
+        <b>확대 / 유지관찰 / 보완 / 중단 / 관찰종료</b> 중 하나를 결정합니다.
+        </div>
+
+        <div class="mso-guide-step">
+        <b>④ MD팀업무 / 제작팀업무 / 기타 메모</b><br>
+        한 사람이 개인 메모를 남기는 기능이 아니라,
+        여러 직원이 같은 상품의 후속업무를 공유하는 공간입니다.
+        MD팀은 노출·가격·재주문·판매전략을,
+        제작팀은 추가생산·원단·납기 등을 기록합니다.
+        </div>
+
+        <div class="mso-guide-step">
+        <b>⑤ WHY 읽는 법</b><br>
+        자동진단은 결과만 보여주지 않습니다.
+        상품조회수, 구매전환율(CVR), 조회당 매출(RPV), 판매량, 매출이
+        비교집단에서 어느 수준인지 설명하고 왜 확대/보완/재검토를 추천하는지 함께 보여줍니다.
+        20년 전체 상품DB는 보존하되 비교·예측에는 최근 3년 데이터를 우선 사용합니다.
+        </div>
+
+        <div class="mso-guide-step">
+        <b>⑥ 반품률</b><br>
+        반품률은 첫 48시간에 판매된 수량 중 이후 실제 반품완료된 비율입니다.
+        초기 48시간 히로 점수에는 넣지 않고,
+        '잘 팔렸지만 실제 만족도가 낮은 상품'을 걸러내는 사후 품질지표로 사용합니다.
+        </div>
+
+        ### 3. MD팀 일일 사용 루틴
+        **출근 후:** 상품 탐색에서 새 상품과 반응 이상상품 확인  
+        **48시간 완료 상품:** 상품 판정 및 후속업무 관리에서 판정 + MD/제작 업무 저장  
+        **판단 완료:** 관찰종료 처리. 기록은 삭제되지 않고 DB에 남음
+
+        ### 4. 지표 뜻
+        - **구매전환율(CVR)**: 상품을 본 고객 중 실제 주문으로 이어진 비율
+        - **조회당 매출(RPV)**: 상품조회 1회가 평균적으로 만들어낸 매출
+        - **히로 점수(HERO Score)**: CVR 30 / RPV 25 / 판매수량 20 / 매출 15 / 상품조회수 10의 종합점수
+        - **반품률**: 첫 48시간 판매분 중 이후 반품완료된 수량 비율
+
+        ### 5. 미샵 DNA
+        최근 3년 성과데이터에서 시기별 잘 팔린 상품의 공통점을 찾습니다.
+        카테고리, 가격대, 상품명 핵심 키워드, 구매전환율(CVR), 조회당 매출(RPV), 판매수량의 공통 패턴을 바탕으로
+        다음 신상품 기획에 참고할 수 있는 가이드를 제안합니다. 오래된 유행의 영향을 줄이기 위해 3년 이전 데이터는 DNA 분석에서 제외합니다.
+
+        ### 6. 상품DB·데이터 설정
+        비밀번호 잠금 없이 팀에서 함께 사용합니다.
+        잘못 잡힌 노출시각 수정, 수동 상품 등록/해제, Cafe24 인증, 수집상태 확인은 이 메뉴에서 처리합니다.
+
+        ### 7. 데이터 원칙
+        **공식 판매반응 데이터는 Cafe24 Analytics 하나만 사용합니다.**
+        SERA와 Sellmate 데이터는 HERO 판정에 혼합하지 않습니다.
+        """,
+        unsafe_allow_html=True,
+    )

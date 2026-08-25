@@ -1,51 +1,73 @@
-# MISHARP HERO ITEM OS 설치·연동 가이드
+# MISHARP HERO ITEM OS v3.0 설치·운영 가이드
 
-## A. 이미 만들어 둔 Streamlit/Supabase를 그대로 쓰는 경우
+## 1. 필수 환경
+- Python 3.11~3.13
+- Streamlit Community Cloud
+- Supabase PostgreSQL
+- Cafe24 Admin OAuth
+- GitHub Actions
 
-기존 `DATABASE_URL`, `TOKEN_ENCRYPTION_KEY`, Cafe24 Client ID/Secret은 그대로 사용할 수 있습니다.
-새 코드가 추가 테이블을 `create_all()`로 생성하므로 기존 상품 18,047개와 OAuth 토큰을 지우지 않습니다.
+## 2. Streamlit Secrets
+```toml
+DATABASE_URL = "postgresql+psycopg://..."
+TOKEN_ENCRYPTION_KEY = "..."
+CAFE24_MALL_ID = "miyawa"
+CAFE24_CLIENT_ID = "..."
+CAFE24_CLIENT_SECRET = "..."
+CAFE24_REDIRECT_URI = "https://hero-md.streamlit.app/"
+CAFE24_SCOPES = "mall.read_product mall.read_order mall.read_analytics"
+CAFE24_API_VERSION = "2026-03-01"
+CAFE24_SHOP_NO = "1"
 
-### 1) Cafe24 Scope 수정
 
-Streamlit Secrets와 GitHub Actions Secrets의 `CAFE24_SCOPES`를 아래로 바꿉니다.
-
-```text
-mall.read_product mall.read_order mall.read_analytics
+MISHARP_HOME_URL = "https://misharp.co.kr/"
+MISHARP_NEW_PRODUCT_URL = ""
+NEW_PRODUCT_DISCOVERY_LOOKBACK_HOURS = "72"
+HOME_CRAWL_MAX_AGE_DAYS = "14"
 ```
 
-그 다음 앱의 `데이터·설정`에서 Cafe24 권한승인을 **다시 한 번** 하고 새 code로 토큰 저장을 합니다.
+## 3. 팀 공용 메뉴
+`상품DB`, `데이터·설정`, `미샵 DNA`는 별도 비밀번호 없이 팀에서 공용으로 사용합니다.
 
-### 2) Analytics 테스트
+## 4. Cafe24
+`데이터·설정 → Cafe24 OAuth`에서 한 번 승인합니다.
+Access Token 만료 시 refresh token으로 자동갱신합니다.
 
-`데이터·설정 > Cafe24 Analytics 테스트`
+## 5. 자동 신상품 탐색
+공식 기준은 Cafe24 API입니다.
+- 최근 등록
+- 판매중
+- 진열중
 
-정상이라면 최근 24시간 상품조회 지표 건수가 표시됩니다.
+홈페이지 크롤링은 실제 노출 교차확인용입니다.
+홈페이지 구조가 바뀌어 크롤링이 실패해도 Cafe24 API 자동탐색은 계속 동작합니다.
 
-### 3) Sellmate
+## 6. 30분 자동화
+GitHub Actions:
+`.github/workflows/sync_30min.yml`
 
-셀메이트 API는 발급받은 고객별 문서를 기준으로 설정합니다. `docs/04_SELLMATE_API.md` 참고.
+매시 17분/47분:
+1. 최근 상품DB 갱신
+2. 신상품 자동탐색
+3. 48시간 Analytics 갱신
+4. 완료상품 반품률 갱신
 
-### 4) SERA
+## 7. 일일 자동화
+`.github/workflows/sync_daily.yml`
 
-`데이터·설정 > SERA 데이터`에서 최신 엑셀을 업로드합니다.
+KST 03:13:
+- 상품DB 전체 재검증
+- 최근 2일 Analytics
+- 48시간 데이터
+- 신상품 재탐색
 
-### 5) 자동화
+## 8. 최근 3년 데이터
+전체 20년 상품DB는 삭제하지 않습니다.
+WHY/예측의 비교대상은 최근 3년을 우선합니다.
 
-GitHub Actions에 동일한 Secrets를 등록합니다.
-- 30분: Analytics 최근 2일 재집계 + Sellmate 현재고 + 48H HERO
-- 매일 KST 03:13: Cafe24 상품 전체 재검증 + Analytics + Sellmate
+과거 Analytics backfill은 서버부하와 API 제한을 고려해
+먼저 `데이터·설정 → 지난달 1개월 시험수집`으로 확인한 뒤
+GitHub Actions의 `최근 3년 HERO 학습데이터 수집`을 수동 실행합니다.
 
-## B. 데이터 우선순위
-
-- 조회/장바구니/판매: Cafe24 Analytics 우선
-- Analytics 값이 아직 없을 경우 SERA 값으로 임시 보완
-- OpV/ESpV/클릭가치: SERA
-- 재고: Sellmate만 사용
-
-## C. 기존 DB 데이터 보존
-
-이번 버전은 기존 `products`, `oauth_tokens`, `launches`, `metrics_48h`를 유지합니다.
-신규 테이블만 추가합니다.
-- `analytics_product_metrics`
-- `inventory_current`
-- `hero_metrics_v2`
+## 9. 직원 사용
+상단 `이용방법` 페이지가 공식 업무 매뉴얼입니다.

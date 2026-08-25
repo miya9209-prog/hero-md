@@ -1,0 +1,6 @@
+MISHARP HERO ITEM OS v3.1 DNA
+2026-08-25
+pytest: 14 passed
+compileall: passed
+관리자 비밀번호: 제거
+메뉴 순서: 상품 탐색 / 상품 판정 및 후속업무 관리 / 미샵 DNA / 상품DB / 데이터·설정

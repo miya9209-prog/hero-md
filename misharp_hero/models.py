@@ -56,6 +56,13 @@ class ProductMD(Base):
     md_owner: Mapped[str | None] = mapped_column(String(100), nullable=True)
     md_note: Mapped[str | None] = mapped_column(Text, nullable=True)
     launch_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+
+    # v3.0 자동 신상품 탐색 메타데이터
+    auto_discovered: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    discovered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    discovery_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    homepage_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -96,6 +103,8 @@ class Launch(Base):
     review_manual: Mapped[str | None] = mapped_column(String(20), nullable=True)
     md_action: Mapped[str | None] = mapped_column(Text, nullable=True)
     production_action: Mapped[str | None] = mapped_column(Text, nullable=True)
+    other_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    judgment_updated_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -136,6 +145,27 @@ class AnalyticsProductMetric(Base):
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     __table_args__ = (
         UniqueConstraint("metric_date", "product_no", name="uq_analytics_day_product"),
+    )
+
+
+class AnalyticsHistoryMonthly(Base):
+    """최근 3년 HERO 사전진단 학습용 월별 상품 성과."""
+    __tablename__ = "analytics_history_monthly"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    period_month: Mapped[str] = mapped_column(String(7), index=True)
+    product_no: Mapped[str] = mapped_column(String(50), index=True)
+    product_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    cart_count: Mapped[int] = mapped_column(Integer, default=0)
+    cart_rate: Mapped[float] = mapped_column(Float, default=0)
+    order_count: Mapped[int] = mapped_column(Integer, default=0)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    revenue: Mapped[float] = mapped_column(Float, default=0)
+    cvr: Mapped[float] = mapped_column(Float, default=0)
+    rpv: Mapped[float] = mapped_column(Float, default=0)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("period_month", "product_no", name="uq_history_month_product"),
     )
 
 
@@ -199,6 +229,8 @@ class HeroMetricV2(Base):
     hero_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     hero_grade: Mapped[str | None] = mapped_column(String(50), nullable=True)
     diagnosis: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    why_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recommended_action: Mapped[str | None] = mapped_column(String(120), nullable=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
@@ -276,4 +308,5 @@ class SyncLog(Base):
 Index("ix_launch_status_window", Launch.close_48h_at, Launch.product_no)
 Index("ix_product_md_watch_launch", ProductMD.hero_watch, ProductMD.launch_at)
 Index("ix_analytics_product_date", AnalyticsProductMetric.product_no, AnalyticsProductMetric.metric_date)
+Index("ix_history_product_month", AnalyticsHistoryMonthly.product_no, AnalyticsHistoryMonthly.period_month)
 Index("ix_inventory_product_capture", InventoryCurrent.product_no, InventoryCurrent.captured_at)

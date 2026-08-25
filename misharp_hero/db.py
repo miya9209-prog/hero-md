@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 from contextlib import contextmanager
 
 from sqlalchemy import create_engine, inspect, text
@@ -44,73 +45,88 @@ def session_scope():
         s.close()
 
 
-def _ensure_product_columns(engine):
-    """create_all이 기존 products 테이블 컬럼을 추가하지 못하므로 최소 마이그레이션을 수행한다."""
+def _ensure_columns(engine, table_name: str, wanted: dict[str, str]):
+    """SQLAlchemy create_all이 기존 테이블 컬럼을 추가하지 못하므로 안전하게 ALTER한다."""
     inspector = inspect(engine)
-    if "products" not in inspector.get_table_names():
+    if table_name not in inspector.get_table_names():
         return
 
-    existing = {c["name"] for c in inspector.get_columns("products")}
-    dialect = engine.dialect.name
-    ts_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
-    wanted = {
-        "retail_price": "FLOAT",
-        "display": "VARCHAR(20)",
-        "selling": "VARCHAR(20)",
-        "cafe24_created_at": ts_type,
-        "cafe24_updated_at": ts_type,
-    }
+    existing = {c["name"] for c in inspector.get_columns(table_name)}
     missing = [(name, coltype) for name, coltype in wanted.items() if name not in existing]
     if not missing:
         return
 
     with engine.begin() as conn:
         for name, coltype in missing:
-            conn.execute(text(f"ALTER TABLE products ADD COLUMN {name} {coltype}"))
+            conn.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {name} {coltype}"))
 
 
-
-
-def _ensure_hero_metric_columns(engine):
-    """기존 hero_metrics_v2에 사후 반품지표 컬럼을 안전하게 추가한다."""
-    inspector = inspect(engine)
-    if "hero_metrics_v2" not in inspector.get_table_names():
-        return
-
-    existing = {c["name"] for c in inspector.get_columns("hero_metrics_v2")}
+def _migrate_existing_tables(engine):
     dialect = engine.dialect.name
     ts_type = "TIMESTAMP" if dialect == "postgresql" else "DATETIME"
-    wanted = {
-        "return_order_count": "INTEGER",
-        "return_qty": "INTEGER",
-        "return_rate": "FLOAT",
-        "return_collected_at": ts_type,
-    }
-    missing = [(name, coltype) for name, coltype in wanted.items() if name not in existing]
-    if not missing:
-        return
+    bool_type = "BOOLEAN" if dialect == "postgresql" else "BOOLEAN"
 
-    with engine.begin() as conn:
-        for name, coltype in missing:
-            conn.execute(text(f"ALTER TABLE hero_metrics_v2 ADD COLUMN {name} {coltype}"))
+    _ensure_columns(
+        engine,
+        "products",
+        {
+            "retail_price": "FLOAT",
+            "display": "VARCHAR(20)",
+            "selling": "VARCHAR(20)",
+            "cafe24_created_at": ts_type,
+            "cafe24_updated_at": ts_type,
+        },
+    )
+
+    _ensure_columns(
+        engine,
+        "product_md",
+        {
+            "auto_discovered": f"{bool_type} DEFAULT FALSE",
+            "discovered_at": ts_type,
+            "discovery_source": "VARCHAR(80)",
+            "homepage_seen_at": ts_type,
+        },
+    )
+
+    _ensure_columns(
+        engine,
+        "launches",
+        {
+            "other_note": "TEXT",
+            "judgment_updated_at": ts_type,
+        },
+    )
+
+    _ensure_columns(
+        engine,
+        "hero_metrics_v2",
+        {
+            "return_order_count": "INTEGER",
+            "return_qty": "INTEGER",
+            "return_rate": "FLOAT",
+            "return_collected_at": ts_type,
+            "why_text": "TEXT",
+            "recommended_action": "VARCHAR(120)",
+        },
+    )
 
 
 def init_db():
-    """동시 Streamlit 실행에서 DDL 충돌이 나지 않도록 PostgreSQL advisory lock 사용."""
+    """기존 운영DB를 보존하면서 신규 테이블/컬럼만 추가한다."""
     engine = get_engine()
 
     if DATABASE_URL.startswith("postgresql"):
+        # Streamlit / GitHub Actions 동시 부팅 시 DDL 충돌 방지.
         with engine.begin() as conn:
-            conn.execute(text("SELECT pg_advisory_xact_lock(20260821)"))
+            conn.execute(text("SELECT pg_advisory_xact_lock(20260825)"))
             Base.metadata.create_all(bind=conn, checkfirst=True)
-        _ensure_product_columns(engine)
-        _ensure_hero_metric_columns(engine)
+        _migrate_existing_tables(engine)
         return
 
     try:
         Base.metadata.create_all(engine, checkfirst=True)
-        _ensure_product_columns(engine)
-        _ensure_hero_metric_columns(engine)
+        _migrate_existing_tables(engine)
     except Exception as e:
         if DATABASE_URL.startswith("sqlite") and "already exists" in str(e).lower():
             return
