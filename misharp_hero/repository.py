@@ -1133,6 +1133,39 @@ def latest_new_product_snapshot():
         }
 
 
+def new_product_discovery_status():
+    """상품탐색 화면용 최신 541 스냅샷 요약."""
+    with session_scope() as s:
+        row = s.scalar(
+            select(NewProductPageSnapshot)
+            .order_by(NewProductPageSnapshot.captured_at.desc())
+            .limit(1)
+        )
+        if row is None:
+            return {
+                "current": 0,
+                "added": 0,
+                "removed": 0,
+                "captured_at": None,
+                "page_url": None,
+            }
+        try:
+            added = json.loads(row.added_json or "[]")
+        except Exception:
+            added = []
+        try:
+            removed = json.loads(row.removed_json or "[]")
+        except Exception:
+            removed = []
+        return {
+            "current": int(row.product_count or 0),
+            "added": len(added),
+            "removed": len(removed),
+            "captured_at": row.captured_at,
+            "page_url": row.page_url,
+        }
+
+
 def save_new_product_snapshot(
     captured_at: datetime,
     page_url: str,
