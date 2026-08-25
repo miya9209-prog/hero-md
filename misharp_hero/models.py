@@ -169,6 +169,30 @@ class AnalyticsHistoryMonthly(Base):
     )
 
 
+class ProductCategoryMonthly(Base):
+    """Cafe24 Analytics 카테고리별 상품성과 월 스냅샷.
+
+    상품은 복수 카테고리에 속할 수 있으므로 원본 관계를 보존하고,
+    DNA/상품DB에서는 성과가 가장 큰 카테고리를 대표 카테고리로 선택한다.
+    """
+    __tablename__ = "product_category_monthly"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    period_month: Mapped[str] = mapped_column(String(7), index=True)
+    product_no: Mapped[str] = mapped_column(String(50), index=True)
+    product_name: Mapped[str | None] = mapped_column(String(300), nullable=True)
+    product_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    category_no: Mapped[str] = mapped_column(String(50), index=True)
+    category_name: Mapped[str] = mapped_column(String(200), index=True)
+    sales_count: Mapped[int] = mapped_column(Integer, default=0)
+    qty: Mapped[int] = mapped_column(Integer, default=0)
+    revenue: Mapped[float] = mapped_column(Float, default=0)
+    cart_count: Mapped[int] = mapped_column(Integer, default=0)
+    collected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
+    __table_args__ = (
+        UniqueConstraint("period_month", "product_no", "category_no", name="uq_category_month_product"),
+    )
+
+
 class InventoryCurrent(Base):
     __tablename__ = "inventory_current"
     id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
@@ -309,4 +333,5 @@ Index("ix_launch_status_window", Launch.close_48h_at, Launch.product_no)
 Index("ix_product_md_watch_launch", ProductMD.hero_watch, ProductMD.launch_at)
 Index("ix_analytics_product_date", AnalyticsProductMetric.product_no, AnalyticsProductMetric.metric_date)
 Index("ix_history_product_month", AnalyticsHistoryMonthly.product_no, AnalyticsHistoryMonthly.period_month)
+Index("ix_category_product_month", ProductCategoryMonthly.product_no, ProductCategoryMonthly.period_month)
 Index("ix_inventory_product_capture", InventoryCurrent.product_no, InventoryCurrent.captured_at)
