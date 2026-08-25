@@ -86,6 +86,9 @@ def _migrate_existing_tables(engine):
             "discovered_at": ts_type,
             "discovery_source": "VARCHAR(80)",
             "homepage_seen_at": ts_type,
+            "homepage_last_seen_at": ts_type,
+            "homepage_exit_at": ts_type,
+            "homepage_exit_status": "VARCHAR(80)",
         },
     )
 
