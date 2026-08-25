@@ -267,14 +267,41 @@ def page_judgment_followup():
     data["판정"] = data["md_followup"].fillna("미정")
 
     # 팀 협의안의 판정표 항목을 그대로 중심에 둔다.
+    # 판정표에서는 팀이 바로 읽고 실행할 업무 내용을 우선한다.
+    # WHY 전체 문장은 아래 선택 상품 상세영역에서 충분히 보여주므로
+    # 상단 표에서는 제외해 MD/제작/기타 메모 폭을 확보한다.
     display_cols = [
-        "product_name", "반품률", "상품등급", "자동진단", "WHY",
+        "product_name", "반품률", "상품등급", "자동진단",
         "판정", "MD팀업무", "제작팀업무", "기타 메모",
     ]
+    display_df = data[display_cols].rename(columns={"product_name": "상품명"})
     st.dataframe(
-        data[display_cols].rename(columns={"product_name": "상품명"}),
+        display_df,
         use_container_width=True,
         hide_index=True,
+        height=min(520, 42 + max(1, len(display_df)) * 42),
+        column_config={
+            "상품명": st.column_config.TextColumn("상품명", width="medium"),
+            "반품률": st.column_config.TextColumn("반품률", width="small"),
+            "상품등급": st.column_config.TextColumn("상품등급", width="small"),
+            "자동진단": st.column_config.TextColumn("자동진단", width="medium"),
+            "판정": st.column_config.TextColumn("판정", width="small"),
+            "MD팀업무": st.column_config.TextColumn(
+                "MD팀업무",
+                width="large",
+                help="MD팀이 저장한 후속 실행업무",
+            ),
+            "제작팀업무": st.column_config.TextColumn(
+                "제작팀업무",
+                width="large",
+                help="제작팀이 저장한 후속 실행업무",
+            ),
+            "기타 메모": st.column_config.TextColumn(
+                "기타 메모",
+                width="large",
+                help="여러 팀이 함께 보는 공용 메모",
+            ),
+        },
     )
 
     st.subheader("공유 후속업무 작성")
@@ -310,19 +337,19 @@ def page_judgment_followup():
             "MD팀업무",
             value=str(chosen.get("md_team_work") or ""),
             placeholder="예: 메인 노출 확대 / 가격 검토 / 재주문 확인",
-            height=120,
+            height=150,
         )
         production_work = b.text_area(
             "제작팀업무",
             value=str(chosen.get("production_team_work") or ""),
             placeholder="예: 추가 생산 가능수량 확인 / 원단·납기 확인",
-            height=120,
+            height=150,
         )
         other_note = st.text_area(
             "기타 메모",
             value=str(chosen.get("other_note") or ""),
             placeholder="여러 팀이 함께 참고할 내용",
-            height=90,
+            height=120,
         )
         submitted = st.form_submit_button("판정 및 후속업무 저장", type="primary", use_container_width=True)
         if submitted:
