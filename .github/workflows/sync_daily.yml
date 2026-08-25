@@ -1,0 +1,31 @@
+name: 일일 상품DB 전체 재검증
+
+on:
+  workflow_dispatch:
+  schedule:
+    # KST 03:13 = UTC 전날 18:13
+    - cron: "13 18 * * *"
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      TOKEN_ENCRYPTION_KEY: ${{ secrets.TOKEN_ENCRYPTION_KEY }}
+      CAFE24_MALL_ID: ${{ secrets.CAFE24_MALL_ID }}
+      CAFE24_CLIENT_ID: ${{ secrets.CAFE24_CLIENT_ID }}
+      CAFE24_CLIENT_SECRET: ${{ secrets.CAFE24_CLIENT_SECRET }}
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+      - run: pip install -r requirements.txt
+      - run: python -m scripts.init_db
+      - name: Cafe24 상품DB 전체 갱신
+        run: python -m scripts.sync_cafe24 --products --analytics --analytics-days 2 --launches
+      - name: 자동탐색 재검증
+        run: python -m scripts.sync_discovery
