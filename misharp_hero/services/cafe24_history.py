@@ -217,20 +217,53 @@ def sync_history_month(year: int, month: int, years_back: int = 3):
 
 
 def sync_completed_months(months: int = 36, years_back: int = 3):
-    """현재 월을 제외한 최근 완료월을 과거→최근 순서로 수집한다."""
+    """현재 월을 제외한 완료월을 최근→과거 순서로 수집한다.
+
+    Cafe24 Analytics는 계정/리소스별로 과거 조회 가능 범위 밖의 날짜에
+    "date 범위를 초과하였습니다."(400)를 반환할 수 있다.
+    최근 월부터 역순으로 수집해 가능한 데이터는 먼저 모두 보존하고,
+    과거 한계에 도달하면 정상 종료한다.
+    """
     today = datetime.now(KST)
     targets = []
-    for n in range(int(months), 0, -1):
+    for n in range(1, int(months) + 1):
         y, m = _shift_month(today.year, today.month, -n)
         targets.append((y, m))
 
     total = 0
     details = []
+    stopped_at = None
+    stop_reason = None
+
     for y, m in targets:
-        count = sync_history_month(y, m, years_back=years_back)
+        period = f"{y:04d}-{m:02d}"
+        try:
+            count = sync_history_month(y, m, years_back=years_back)
+        except RuntimeError as exc:
+            message = str(exc)
+            if "date 범위를 초과" in message or "400 BAD_REQUEST" in message:
+                stopped_at = period
+                stop_reason = "Cafe24 Analytics 과거 조회 가능 범위 도달"
+                log_sync(
+                    "HERO 3년 학습데이터",
+                    "부분완료",
+                    f"{period}부터 과거 데이터 조회 불가 · 최근 {len(details)}개월 저장 완료",
+                )
+                break
+            raise
+
         total += count
-        details.append((f"{y:04d}-{m:02d}", count))
-    return {"months": len(targets), "rows": total, "details": details}
+        details.append((period, count))
+
+    return {
+        "requested_months": int(months),
+        "collected_months": len(details),
+        "rows": total,
+        "earliest_collected": details[-1][0] if details else None,
+        "stopped_at": stopped_at,
+        "stop_reason": stop_reason,
+        "details": details,
+    }
 
 
 def sync_recent_categories(days: int = 90, years_back: int = 3):
