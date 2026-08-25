@@ -45,7 +45,7 @@ from misharp_hero.services.cafe24_analytics import (
     Cafe24AnalyticsClient,
     sync_analytics_days,
 )
-from misharp_hero.services.cafe24_history import sync_history_month
+from misharp_hero.services.cafe24_history import sync_history_month, sync_recent_categories
 from misharp_hero.services.cafe24_returns import sync_return_metrics
 from misharp_hero.services.md_excel_import import import_md_excel
 from misharp_hero.services.new_product_discovery import discover_new_products
@@ -428,7 +428,7 @@ def page_misharp_dna():
         return "10만원 이상"
 
     winners["가격대"] = winners["selling_price"].apply(price_band)
-    cats = [str(x).strip() for x in winners.get("category", pd.Series(dtype=str)).tolist() if str(x).strip() and str(x).lower() not in {"none", "nan"}]
+    cats = [str(x).strip() for x in winners.get("category", pd.Series(dtype=str)).tolist() if str(x).strip() and str(x).lower() not in {"none", "nan", "미분류"}]
     top_categories = Counter(cats).most_common(5)
     top_price = Counter(winners["가격대"].tolist()).most_common(4)
 
@@ -808,12 +808,26 @@ def page_data_settings():
         )
     today = datetime.now(KST)
     prev = today.replace(day=1) - timedelta(days=1)
-    if st.button(f"지난달({prev:%Y-%m}) 1개월 시험수집"):
+    h1, h2 = st.columns(2)
+    if h1.button(f"지난달({prev:%Y-%m}) 1개월 시험수집", use_container_width=True):
         try:
             count = sync_history_month(prev.year, prev.month, years_back=3)
-            st.success(f"{prev:%Y-%m} · {count:,}개 상품 학습데이터 저장")
+            st.success(f"{prev:%Y-%m} · {count:,}개 상품 학습데이터 + 실제 카테고리 저장")
         except Exception as e:
             st.error(str(e))
+    if h2.button("최근 90일 카테고리 갱신", use_container_width=True):
+        try:
+            result = sync_recent_categories(90)
+            st.success(
+                f"카테고리 {result['rows']:,}행 저장 · {result['products']:,}개 상품 확인 · "
+                f"상품DB {result['updated']:,}개 반영"
+            )
+        except Exception as e:
+            st.error(str(e))
+    st.caption(
+        "카테고리는 상품명으로 추정하지 않습니다. Cafe24 Analytics의 실제 상품×카테고리 성과를 저장하고, "
+        "복수 카테고리는 매출→판매수량→판매건수→장바구니 순으로 대표 카테고리를 정합니다."
+    )
 
     st.divider()
     st.subheader("6. 기존 MD 엑셀 이관")
