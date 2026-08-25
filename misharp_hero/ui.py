@@ -232,6 +232,17 @@ def page_judgment_followup():
     )
 
     data = judgment_launches(include_ended=include_ended)
+
+    # 방어 필터:
+    # repository의 close_48h_at 계산값과 무관하게 실제 launch_at 기준
+    # 48시간이 지난 상품만 판정/후속업무 화면에 노출한다.
+    # 상품 탐색(0~48H)과 판정(48H 이후)이 동시에 보이는 상황을 차단한다.
+    if not data.empty and "launch_at" in data.columns:
+        now_kst = datetime.now(KST).replace(tzinfo=None)
+        launched = pd.to_datetime(data["launch_at"], errors="coerce")
+        elapsed_hours = (pd.Timestamp(now_kst) - launched).dt.total_seconds() / 3600
+        data = data[launched.notna() & (elapsed_hours >= 48.0)].copy()
+
     if data.empty:
         st.info("아직 48시간이 완료된 상품이 없습니다.")
         return
