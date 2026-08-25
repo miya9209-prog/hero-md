@@ -89,6 +89,6 @@ SERA_AUTH_TOKEN = get_setting("SERA_AUTH_TOKEN", "")
 
 # v3.0 팀 운영 / 자동 신상품 탐색
 MISHARP_HOME_URL = get_setting("MISHARP_HOME_URL", "https://misharp.co.kr/")
-MISHARP_NEW_PRODUCT_URL = get_setting("MISHARP_NEW_PRODUCT_URL", "")
+MISHARP_NEW_PRODUCT_URL = get_setting("MISHARP_NEW_PRODUCT_URL", "https://misharp.co.kr/product/list.html?cate_no=541")
 NEW_PRODUCT_DISCOVERY_LOOKBACK_HOURS = get_int("NEW_PRODUCT_DISCOVERY_LOOKBACK_HOURS", 72)
 HOME_CRAWL_MAX_AGE_DAYS = get_int("HOME_CRAWL_MAX_AGE_DAYS", 14)

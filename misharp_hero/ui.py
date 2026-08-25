@@ -161,6 +161,17 @@ def page_explore():
     data["자동진단"] = data["_diagnosis_live"]
     data["추천"] = data["_action_live"]
     data["탐색경로"] = data["discovery_source"].fillna("수동 등록")
+    data["신상감지시각"] = data["discovered_at"].apply(
+        lambda x: _as_dt(x).strftime("%m-%d %H:%M") if _as_dt(x) else "-"
+    )
+    data["판매상태"] = data.apply(
+        lambda r: (
+            str(r.get("homepage_exit_status") or "").strip()
+            if str(r.get("homepage_exit_status") or "").strip()
+            else ("신상페이지 노출중" if r.get("homepage_last_seen_at") is not None else "확인중")
+        ),
+        axis=1,
+    )
 
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("48시간 탐색중", f"{len(data):,}")
@@ -169,9 +180,10 @@ def page_explore():
     m4.metric("전환 문제", f"{int((data['자동진단'] == '전환 문제').sum()):,}")
 
     cols = [
-        "product_name", "경과시간", "남은시간", "views", "cart_count", "장바구니율",
-        "order_count", "qty", "revenue", "구매전환율(CVR)", "조회당 매출(RPV)",
-        "히로 점수(HERO Score)", "hero_grade", "자동진단", "추천", "탐색경로",
+        "product_name", "신상감지시각", "판매상태", "경과시간", "남은시간",
+        "views", "cart_count", "장바구니율", "order_count", "qty", "revenue",
+        "구매전환율(CVR)", "조회당 매출(RPV)", "히로 점수(HERO Score)",
+        "hero_grade", "자동진단", "추천", "탐색경로",
     ]
     cols = [c for c in cols if c in data.columns]
     st.dataframe(

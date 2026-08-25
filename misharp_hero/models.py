@@ -62,6 +62,9 @@ class ProductMD(Base):
     discovered_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
     discovery_source: Mapped[str | None] = mapped_column(String(80), nullable=True)
     homepage_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    homepage_last_seen_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    homepage_exit_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True, index=True)
+    homepage_exit_status: Mapped[str | None] = mapped_column(String(80), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -318,6 +321,23 @@ class OAuthToken(Base):
     refresh_token_enc: Mapped[str | None] = mapped_column(Text, nullable=True)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+
+class NewProductPageSnapshot(Base):
+    """미샵 신상페이지(cate_no=541) 노출 스냅샷.
+
+    Cafe24 상품 등록일이 아니라 실제 신상페이지 등장/이탈을 출시 판정 기준으로 사용한다.
+    """
+    __tablename__ = "new_product_page_snapshots"
+    id: Mapped[int] = mapped_column(primary_key=True, autoincrement=True)
+    captured_at: Mapped[datetime] = mapped_column(DateTime, index=True)
+    page_url: Mapped[str] = mapped_column(Text)
+    product_nos_json: Mapped[str] = mapped_column(Text)
+    product_count: Mapped[int] = mapped_column(Integer, default=0)
+    added_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    removed_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.utcnow)
 
 
 class SyncLog(Base):

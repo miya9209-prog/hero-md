@@ -1,4 +1,5 @@
 from __future__ import annotations
+import json
 from datetime import datetime, timedelta
 
 import pandas as pd
@@ -22,6 +23,7 @@ from misharp_hero.models import (
     ActionItem,
     SeraMetric,
     SyncLog,
+    NewProductPageSnapshot,
 )
 
 
@@ -488,6 +490,8 @@ def product_master_page(
                pm.md_owner, pm.md_note, pm.launch_id,
                COALESCE(pm.auto_discovered, FALSE) AS auto_discovered,
                pm.discovered_at, pm.discovery_source, pm.homepage_seen_at,
+               pm.homepage_last_seen_at, pm.homepage_exit_at, pm.homepage_exit_status,
+               p.selling_price, p.display AS cafe24_display, p.selling AS cafe24_selling,
                l.close_48h_at,
                COALESCE(v2.hero_score, m.hero_score) AS hero_score,
                COALESCE(v2.hero_grade, m.hero_grade) AS hero_grade,
@@ -538,6 +542,8 @@ def current_launches(only_observed: bool = False):
                pm.season, pm.sourcing_type, pm.md_owner, pm.md_note,
                COALESCE(pm.auto_discovered, FALSE) AS auto_discovered,
                pm.discovered_at, pm.discovery_source, pm.homepage_seen_at,
+               pm.homepage_last_seen_at, pm.homepage_exit_at, pm.homepage_exit_status,
+               p.selling_price, p.display AS cafe24_display, p.selling AS cafe24_selling,
                COALESCE(v2.views, m.views, 0) AS views,
                COALESCE(v2.order_count, m.order_count, 0) AS order_count,
                COALESCE(v2.qty, m.qty, 0) AS qty,
@@ -557,6 +563,7 @@ def current_launches(only_observed: bool = False):
                COALESCE(v2.collected_at, m.collected_at) AS collected_at
         FROM launches l
         LEFT JOIN product_md pm ON pm.launch_id = l.id
+        LEFT JOIN products p ON p.product_no = l.product_no
         LEFT JOIN hero_metrics_v2 v2 ON v2.launch_id = l.id
         LEFT JOIN metrics_48h m ON m.launch_id = l.id
         {where}
@@ -1045,8 +1052,13 @@ def auto_register_exploration(
     detected_at: datetime,
     source: str,
     homepage_seen_at: datetime | None = None,
+    launch_at: datetime | None = None,
 ):
-    """신상품을 상품 탐색에 자동 등록하고 48시간 관찰건을 생성한다."""
+    """541 신상페이지 신규등장 상품을 상품 탐색에 등록한다.
+
+    같은 product_no가 과거에 이미 판매된 상품이어도 541 페이지에서 새롭게 등장한
+    '재오픈 신상'이면 새 Launch를 만든다. 단, 현재 48시간 관찰이 살아 있으면 중복 생성하지 않는다.
+    """
     product_no = str(product_no or "").strip()
     if not product_no:
         return {"created": False, "reason": "product_no 없음"}
@@ -1061,44 +1073,153 @@ def auto_register_exploration(
             pm = ProductMD(product_no=product_no)
             s.add(pm)
 
-        # 이미 관찰 중이거나 판정 이력이 있는 상품은 중복 자동등록하지 않는다.
+        # 현재 진행 중인 관찰건은 중복등록하지 않는다.
         if pm.launch_id:
-            launch = s.get(Launch, pm.launch_id)
-            if launch is not None:
-                if homepage_seen_at and pm.homepage_seen_at is None:
-                    pm.homepage_seen_at = homepage_seen_at
-                if source and not pm.discovery_source:
-                    pm.discovery_source = source
-                if pm.discovered_at is None:
-                    pm.discovered_at = detected_at
+            existing = s.get(Launch, pm.launch_id)
+            if existing is not None and existing.close_48h_at and existing.close_48h_at > detected_at:
+                pm.homepage_seen_at = pm.homepage_seen_at or homepage_seen_at
+                pm.homepage_last_seen_at = homepage_seen_at or detected_at
+                pm.homepage_exit_at = None
+                pm.homepage_exit_status = None
                 pm.updated_at = datetime.utcnow()
                 s.flush()
-                return {"created": False, "launch_id": launch.id, "reason": "기존 관찰건"}
+                return {"created": False, "launch_id": existing.id, "reason": "현재 관찰중"}
 
-        launch_at = detected_at
+        effective_launch_at = launch_at or detected_at
         launch = Launch(
             product_id=product.id,
             product_no=product_no,
             product_name=product.product_name or "",
             supplier_product_name=product.supplier_product_name,
-            launch_at=launch_at,
-            close_48h_at=launch_at + timedelta(hours=48),
+            launch_at=effective_launch_at,
+            close_48h_at=effective_launch_at + timedelta(hours=48),
         )
         s.add(launch)
         s.flush()
 
         pm.hero_watch = True
-        pm.launch_at = launch_at
+        pm.launch_at = effective_launch_at
         pm.launch_id = launch.id
         pm.auto_discovered = True
         pm.discovered_at = detected_at
-        pm.discovery_source = source or "Cafe24 API"
-        if homepage_seen_at:
-            pm.homepage_seen_at = homepage_seen_at
+        pm.discovery_source = source or "541 신상페이지 + Cafe24 API"
+        pm.homepage_seen_at = homepage_seen_at or detected_at
+        pm.homepage_last_seen_at = homepage_seen_at or detected_at
+        pm.homepage_exit_at = None
+        pm.homepage_exit_status = None
         pm.updated_at = datetime.utcnow()
         s.flush()
         return {"created": True, "launch_id": launch.id}
 
+
+def latest_new_product_snapshot():
+    with session_scope() as s:
+        row = s.scalar(
+            select(NewProductPageSnapshot)
+            .order_by(NewProductPageSnapshot.captured_at.desc())
+            .limit(1)
+        )
+        if row is None:
+            return None
+        try:
+            product_nos = set(json.loads(row.product_nos_json or "[]"))
+        except Exception:
+            product_nos = set()
+        return {
+            "id": row.id,
+            "captured_at": row.captured_at,
+            "page_url": row.page_url,
+            "product_nos": {str(x) for x in product_nos},
+        }
+
+
+def save_new_product_snapshot(
+    captured_at: datetime,
+    page_url: str,
+    product_nos: set[str],
+    added: set[str] | None = None,
+    removed: set[str] | None = None,
+):
+    with session_scope() as s:
+        obj = NewProductPageSnapshot(
+            captured_at=captured_at,
+            page_url=page_url,
+            product_nos_json=json.dumps(sorted(str(x) for x in product_nos), ensure_ascii=False),
+            product_count=len(product_nos),
+            added_json=json.dumps(sorted(str(x) for x in (added or set())), ensure_ascii=False),
+            removed_json=json.dumps(sorted(str(x) for x in (removed or set())), ensure_ascii=False),
+        )
+        s.add(obj)
+        s.flush()
+        return obj.id
+
+
+def product_rows_for_discovery(product_nos: set[str]):
+    return _df_in(
+        """
+        SELECT product_no, product_name, selling_price, display, selling,
+               cafe24_created_at, cafe24_updated_at
+        FROM products
+        WHERE product_no IN :product_nos
+        """,
+        sorted(str(x) for x in product_nos),
+    )
+
+
+def mark_homepage_seen(product_nos: set[str], seen_at: datetime):
+    if not product_nos:
+        return 0
+    rows = product_rows_for_discovery(product_nos)
+    if rows.empty:
+        return 0
+    count = 0
+    with session_scope() as s:
+        for pno in rows["product_no"].astype(str).tolist():
+            pm = s.scalar(select(ProductMD).where(ProductMD.product_no == pno))
+            if pm is None:
+                pm = ProductMD(product_no=pno)
+                s.add(pm)
+            pm.homepage_last_seen_at = seen_at
+            pm.homepage_exit_at = None
+            pm.homepage_exit_status = None
+            pm.updated_at = datetime.utcnow()
+            count += 1
+        s.flush()
+    return count
+
+
+def mark_homepage_exit(product_nos: set[str], exit_at: datetime):
+    """541 페이지에서 사라진 상품을 API 상태와 함께 기록한다.
+
+    판매중/진열중이면 '541 이탈(품절 가능)'로만 표시하고 품절로 단정하지 않는다.
+    """
+    if not product_nos:
+        return 0
+    rows = product_rows_for_discovery(product_nos)
+    status_map = {}
+    for _, r in rows.iterrows():
+        display = str(r.get("display") or "").upper()
+        selling = str(r.get("selling") or "").upper()
+        if selling in {"F", "FALSE", "N", "NO", "0"}:
+            status = "판매중지"
+        elif display in {"F", "FALSE", "N", "NO", "0"}:
+            status = "진열종료"
+        else:
+            status = "541 이탈(품절 가능)"
+        status_map[str(r.get("product_no"))] = status
+
+    count = 0
+    with session_scope() as s:
+        for pno in sorted(str(x) for x in product_nos):
+            pm = s.scalar(select(ProductMD).where(ProductMD.product_no == pno))
+            if pm is None:
+                continue
+            pm.homepage_exit_at = exit_at
+            pm.homepage_exit_status = status_map.get(pno, "541 이탈")
+            pm.updated_at = datetime.utcnow()
+            count += 1
+        s.flush()
+    return count
 
 def three_year_history_benchmark():
     """WHY 설명용 비교집단.
