@@ -15,6 +15,7 @@ from misharp_hero.models import (
     Metric48h,
     AnalyticsProductMetric,
     AnalyticsHistoryMonthly,
+    ProductCategoryMonthly,
     InventoryCurrent,
     HeroMetricV2,
     MonthlyHero,
@@ -264,6 +265,7 @@ def upsert_analytics_daily(rows: list[dict]):
     stmt = _upsert_stmt(
         AnalyticsProductMetric,
     AnalyticsHistoryMonthly,
+    ProductCategoryMonthly,
         rows,
         ["metric_date", "product_no"],
         [
@@ -709,6 +711,127 @@ def upsert_history_monthly(rows: list[dict]):
     return len(rows)
 
 
+
+def upsert_category_monthly(rows: list[dict]):
+    if not rows:
+        return 0
+    engine = get_engine()
+    with engine.begin() as conn:
+        if engine.dialect.name == "postgresql":
+            stmt = pg_insert(ProductCategoryMonthly).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=[
+                    ProductCategoryMonthly.period_month,
+                    ProductCategoryMonthly.product_no,
+                    ProductCategoryMonthly.category_no,
+                ],
+                set_={
+                    "product_name": stmt.excluded.product_name,
+                    "product_code": stmt.excluded.product_code,
+                    "category_name": stmt.excluded.category_name,
+                    "sales_count": stmt.excluded.sales_count,
+                    "qty": stmt.excluded.qty,
+                    "revenue": stmt.excluded.revenue,
+                    "cart_count": stmt.excluded.cart_count,
+                    "collected_at": stmt.excluded.collected_at,
+                },
+            )
+        elif engine.dialect.name == "sqlite":
+            stmt = sqlite_insert(ProductCategoryMonthly).values(rows)
+            stmt = stmt.on_conflict_do_update(
+                index_elements=["period_month", "product_no", "category_no"],
+                set_={
+                    "product_name": stmt.excluded.product_name,
+                    "product_code": stmt.excluded.product_code,
+                    "category_name": stmt.excluded.category_name,
+                    "sales_count": stmt.excluded.sales_count,
+                    "qty": stmt.excluded.qty,
+                    "revenue": stmt.excluded.revenue,
+                    "cart_count": stmt.excluded.cart_count,
+                    "collected_at": stmt.excluded.collected_at,
+                },
+            )
+        else:
+            raise RuntimeError(f"지원하지 않는 DB: {engine.dialect.name}")
+        conn.execute(stmt)
+    return len(rows)
+
+
+def apply_representative_categories(product_nos: list[str] | None = None):
+    """카테고리별 실적에서 상품별 대표 카테고리를 products.category에 반영한다.
+
+    우선순위: 카테고리 매출 > 판매수량 > 판매건수 > 장바구니 > 최근월.
+    상품명으로 카테고리를 추정하지 않는다.
+    """
+    where = ""
+    params = {}
+    if product_nos:
+        data = _df_in(
+            """
+            SELECT period_month, product_no, category_no, category_name,
+                   sales_count, qty, revenue, cart_count
+            FROM product_category_monthly
+            WHERE product_no IN :product_nos
+            """,
+            [str(x) for x in product_nos],
+        )
+    else:
+        data = df(
+            """
+            SELECT period_month, product_no, category_no, category_name,
+                   sales_count, qty, revenue, cart_count
+            FROM product_category_monthly
+            """
+        )
+    if data.empty:
+        return 0
+    for c in ["sales_count", "qty", "revenue", "cart_count"]:
+        data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
+    data["category_name"] = data["category_name"].fillna("").astype(str).str.strip()
+    data = data[data["category_name"] != ""]
+    if data.empty:
+        return 0
+    # 같은 카테고리의 여러 월 실적을 합산하되, 동률이면 최근 데이터 우선.
+    grouped = (
+        data.groupby(["product_no", "category_no", "category_name"], as_index=False)
+        .agg(
+            revenue=("revenue", "sum"),
+            qty=("qty", "sum"),
+            sales_count=("sales_count", "sum"),
+            cart_count=("cart_count", "sum"),
+            latest_month=("period_month", "max"),
+        )
+    )
+    grouped = grouped.sort_values(
+        ["product_no", "revenue", "qty", "sales_count", "cart_count", "latest_month"],
+        ascending=[True, False, False, False, False, False],
+    )
+    best = grouped.drop_duplicates("product_no", keep="first")
+    engine = get_engine()
+    updated = 0
+    with engine.begin() as conn:
+        for r in best.itertuples(index=False):
+            result = conn.execute(
+                text("UPDATE products SET category=:category, updated_at=:updated_at WHERE product_no=:product_no"),
+                {
+                    "category": str(r.category_name),
+                    "updated_at": datetime.utcnow(),
+                    "product_no": str(r.product_no),
+                },
+            )
+            updated += int(result.rowcount or 0)
+    return updated
+
+
+def category_summary():
+    return df(
+        """
+        SELECT COUNT(*) AS rows_count, COUNT(DISTINCT product_no) AS product_count,
+               MIN(period_month) AS first_month, MAX(period_month) AS last_month
+        FROM product_category_monthly
+        """
+    )
+
 def history_summary():
     return df(
         """
@@ -750,7 +873,7 @@ def dna_history_dataset(months: int = 12):
         """
         SELECT h.product_no,
                COALESCE(MAX(p.product_name), MAX(h.product_name)) AS product_name,
-               MAX(p.category) AS category,
+               MAX(p.category) AS product_db_category,
                MAX(p.selling_price) AS selling_price,
                SUM(COALESCE(h.views,0)) AS views,
                SUM(COALESCE(h.cart_count,0)) AS cart_count,
@@ -773,6 +896,40 @@ def dna_history_dataset(months: int = 12):
     )
     if data.empty:
         return data
+
+    # 선택 기간의 실제 Cafe24 Analytics 카테고리 성과로 대표 카테고리를 결정한다.
+    # 카테고리가 없을 때 상품명으로 추정하지 않고 상품DB 값 또는 미분류만 사용한다.
+    cat = df(
+        """
+        SELECT product_no, category_no, category_name,
+               SUM(COALESCE(revenue,0)) AS revenue,
+               SUM(COALESCE(qty,0)) AS qty,
+               SUM(COALESCE(sales_count,0)) AS sales_count,
+               SUM(COALESCE(cart_count,0)) AS cart_count,
+               MAX(period_month) AS latest_month
+        FROM product_category_monthly
+        WHERE period_month BETWEEN :start_month AND :end_month
+        GROUP BY product_no, category_no, category_name
+        """,
+        {"start_month": str(min_month), "end_month": str(max_month)},
+    )
+    category_map = {}
+    if not cat.empty:
+        for c in ["revenue", "qty", "sales_count", "cart_count"]:
+            cat[c] = pd.to_numeric(cat[c], errors="coerce").fillna(0)
+        cat["category_name"] = cat["category_name"].fillna("").astype(str).str.strip()
+        cat = cat[cat["category_name"] != ""].sort_values(
+            ["product_no", "revenue", "qty", "sales_count", "cart_count", "latest_month"],
+            ascending=[True, False, False, False, False, False],
+        )
+        best_cat = cat.drop_duplicates("product_no", keep="first")
+        category_map = dict(zip(best_cat["product_no"].astype(str), best_cat["category_name"]))
+    data["category"] = data.apply(
+        lambda r: category_map.get(str(r["product_no"]))
+        or (str(r.get("product_db_category") or "").strip() if str(r.get("product_db_category") or "").strip().lower() not in {"", "none", "nan"} else "미분류"),
+        axis=1,
+    )
+
     for c in ["views", "cart_count", "order_count", "qty", "revenue", "selling_price"]:
         if c in data.columns:
             data[c] = pd.to_numeric(data[c], errors="coerce").fillna(0)
