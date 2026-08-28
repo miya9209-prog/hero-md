@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, time, timedelta
+from datetime import datetime, time
+from difflib import SequenceMatcher
+from html.parser import HTMLParser
 from urllib.parse import urlencode, urlparse, parse_qsl, urlunparse
 from zoneinfo import ZoneInfo
 
@@ -14,6 +16,7 @@ from misharp_hero.repository import (
     log_sync,
     mark_homepage_exit,
     mark_homepage_seen,
+    new_product_baseline_for_day,
     product_rows_for_discovery,
     save_new_product_snapshot,
 )
@@ -26,19 +29,70 @@ NEW_PRODUCT_URL = (
     or "https://misharp.co.kr/product/list.html?cate_no=541"
 )
 
-_PRODUCT_PATTERNS = [
-    re.compile(r"[?&]product_no=(\d+)", re.I),
-    re.compile(r"/product/[^/\"'?#]+/(\d+)(?:/|[?#\"'])", re.I),
-    re.compile(r"/product/detail\.html[^\"']*?product_no=(\d+)", re.I),
-]
+_ANCHOR_ID_RE = re.compile(r"anchorBoxId_(\d+)", re.I)
+_TOTAL_RE = re.compile(r"TOTAL\s*:\s*([0-9,]+)", re.I)
 
 
-def extract_product_nos(html: str) -> set[str]:
-    text = html or ""
-    found: set[str] = set()
-    for pattern in _PRODUCT_PATTERNS:
-        found.update(pattern.findall(text))
-    return {str(x).strip() for x in found if str(x).strip()}
+class _Cafe24ProductGridParser(HTMLParser):
+    """실제 Cafe24 상품그리드(prdList)의 li#anchorBoxId_상품번호만 순서대로 읽는다."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._prd_depth = 0
+        self.ordered = []
+        self._seen = set()
+        self.text_parts = []
+
+    @staticmethod
+    def _classes(attrs):
+        raw = dict(attrs).get("class", "") or ""
+        return {x.strip() for x in raw.split() if x.strip()}
+
+    def handle_starttag(self, tag, attrs):
+        attrs_d = dict(attrs)
+        classes = self._classes(attrs)
+
+        if tag.lower() in {"ul", "ol"} and any("prdList" in c for c in classes):
+            self._prd_depth += 1
+            return
+
+        if self._prd_depth and tag.lower() in {"ul", "ol"}:
+            self._prd_depth += 1
+
+        if self._prd_depth and tag.lower() == "li":
+            raw_id = attrs_d.get("id", "") or ""
+            m = _ANCHOR_ID_RE.search(raw_id)
+            if m:
+                pno = m.group(1)
+                if pno not in self._seen:
+                    self.ordered.append(pno)
+                    self._seen.add(pno)
+
+    def handle_endtag(self, tag):
+        if self._prd_depth and tag.lower() in {"ul", "ol"}:
+            self._prd_depth -= 1
+
+    def handle_data(self, data):
+        if data:
+            self.text_parts.append(data)
+
+
+def parse_product_grid(html: str):
+    parser = _Cafe24ProductGridParser()
+    parser.feed(html or "")
+    ordered = parser.ordered
+
+    if not ordered:
+        seen = set()
+        for pno in _ANCHOR_ID_RE.findall(html or ""):
+            if pno not in seen:
+                ordered.append(pno)
+                seen.add(pno)
+
+    text = " ".join(parser.text_parts)
+    m = _TOTAL_RE.search(text)
+    reported_total = int(m.group(1).replace(",", "")) if m else None
+    return ordered, reported_total
 
 
 def _url_with_page(url: str, page: int) -> str:
@@ -48,117 +102,150 @@ def _url_with_page(url: str, page: int) -> str:
     return urlunparse(parsed._replace(query=urlencode(q)))
 
 
-def crawl_new_product_page(url: str | None = None, max_pages: int = 10) -> set[str]:
-    """미샵 신상페이지의 현재 노출 상품을 여러 페이지에 걸쳐 전부 수집한다."""
+def crawl_new_product_page(url: str | None = None, max_pages: int = 20):
     base = (url or NEW_PRODUCT_URL).strip()
     if not base:
         raise RuntimeError("미샵 신상페이지 URL이 없습니다.")
 
-    all_nos: set[str] = set()
-    previous_page_set: set[str] | None = None
+    all_ordered = []
+    seen = set()
+    reported_total = None
+    pages = 0
 
     for page in range(1, max(1, int(max_pages)) + 1):
         target = _url_with_page(base, page)
         r = requests.get(
             target,
             headers={
-                "User-Agent": "Mozilla/5.0 (compatible; MISHARP-HERO-ITEM-OS/3.3)",
+                "User-Agent": "Mozilla/5.0 (compatible; MISHARP-HERO-ITEM-OS/4.0)",
                 "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.5",
                 "Cache-Control": "no-cache",
             },
             timeout=25,
         )
         r.raise_for_status()
-        current = extract_product_nos(r.text)
+        page_ordered, page_total = parse_product_grid(r.text)
+        if page == 1:
+            reported_total = page_total
 
-        if not current:
-            break
-        # Cafe24가 마지막 페이지를 넘어가면 동일 목록을 반복하는 경우 방지
-        if previous_page_set is not None and current == previous_page_set:
-            break
-
-        new_ids = current - all_nos
-        if not new_ids:
+        if not page_ordered:
             break
 
-        all_nos.update(current)
-        previous_page_set = current
+        new_count = 0
+        for pno in page_ordered:
+            if pno not in seen:
+                all_ordered.append(pno)
+                seen.add(pno)
+                new_count += 1
 
-    return all_nos
+        if new_count == 0:
+            break
+        pages += 1
+
+        if reported_total is not None and len(all_ordered) >= reported_total:
+            break
+
+    if reported_total is not None and len(all_ordered) != reported_total:
+        raise RuntimeError(
+            f"신상페이지 상품수 불일치: 화면 TOTAL {reported_total}개 / "
+            f"실제 상품그리드 인식 {len(all_ordered)}개. 자동등록 중지."
+        )
+
+    if not all_ordered:
+        raise RuntimeError("신상페이지 실제 상품그리드를 인식하지 못했습니다.")
+
+    return {
+        "ordered": all_ordered,
+        "reported_total": reported_total,
+        "pages": pages,
+    }
+
+
+def detect_top_open_block(baseline_ordered, current_ordered, min_anchor_size: int = 5, max_open: int = 40):
+    baseline = [str(x) for x in baseline_ordered or []]
+    current = [str(x) for x in current_ordered or []]
+    if not baseline or not current:
+        return [], "기준순서 없음"
+
+    matcher = SequenceMatcher(a=baseline, b=current, autojunk=False)
+    blocks = [b for b in matcher.get_matching_blocks() if b.size >= max(3, int(min_anchor_size))]
+    if not blocks:
+        return [], "안정 정렬구간 없음"
+
+    anchor = min(blocks, key=lambda b: (b.b, -b.size))
+    promoted = current[: anchor.b]
+
+    if len(promoted) > int(max_open):
+        return [], f"상단변화 {len(promoted)}개로 과다"
+
+    return promoted, f"안정구간 {anchor.size}개 / 상단변화 {len(promoted)}개"
 
 
 def _flag_true(v) -> bool:
     return str(v or "").strip().upper() in {"T", "TRUE", "Y", "YES", "1"}
 
 
+def _in_launch_window(now: datetime) -> bool:
+    return now.weekday() < 5 and time(11, 50) <= now.time() <= time(16, 0)
+
+
 def _canonical_launch_at(detected_at: datetime) -> datetime:
-    """평일 낮 12시 신상 오픈을 실제 48H 시작시각으로 보정한다."""
-    # 월~금, 11:30~15:00 사이 첫 감지면 당일 12:00를 출시시각으로 사용
-    if detected_at.weekday() < 5:
-        t = detected_at.time()
-        if time(11, 30) <= t <= time(15, 0):
-            return detected_at.replace(hour=12, minute=0, second=0, microsecond=0)
+    if detected_at.weekday() < 5 and time(11, 50) <= detected_at.time() <= time(16, 0):
+        return detected_at.replace(hour=12, minute=0, second=0, microsecond=0)
     return detected_at
 
 
 def discover_new_products():
-    """미샵 신상품 자동탐색 v2.
-
-    출시 판정의 기준은 Cafe24 상품 생성일이 아니라
-    '신상페이지에 직전 스냅샷에는 없던 product_no가 새로 등장했는가'이다.
-
-    Cafe24 API는 신규/기존 재오픈 상품 모두의 상품정보, 판매/진열 상태를 검증하는 용도로 사용한다.
-    """
     now = datetime.now(KST).replace(tzinfo=None)
 
-    # 기존 상품 재오픈도 잡아야 하므로 최근 수정상품을 넉넉히 갱신한다.
-    sync_products_incremental(24 * 14)
+    # 매 30분 14일치 대신 최근 72시간만 갱신
+    sync_products_incremental(72)
 
-    current = crawl_new_product_page()
+    crawl = crawl_new_product_page()
+    current_ordered = crawl["ordered"]
+    current_set = set(current_ordered)
+    reported_total = crawl["reported_total"]
+
     previous = latest_new_product_snapshot()
+    removed = [
+        p for p in (previous.get("ordered_product_nos") or [])
+        if p not in current_set
+    ] if previous else []
 
-    # 첫 실행은 오탐 방지를 위해 현재 페이지를 기준선으로만 저장한다.
-    if previous is None:
-        save_new_product_snapshot(now, NEW_PRODUCT_URL, current, set(), set())
-        mark_homepage_seen(current, now)
-        msg = f"기준선 생성 · 신상 현재상품 {len(current)}개 · 신규등록 0개"
-        log_sync("신상품 자동탐색", "성공", msg)
-        return {
-            "baseline": True,
-            "current": len(current),
-            "added": 0,
-            "removed": 0,
-            "registered": 0,
-        }
-
-    previous_set = set(previous.get("product_nos") or set())
-    added = current - previous_set
-    removed = previous_set - current
-
-    # 현재 노출상품 last_seen 갱신 / 이탈상품 상태 기록
-    mark_homepage_seen(current, now)
+    mark_homepage_seen(current_set, now)
     if removed:
-        # API 상태를 가능한 최신으로 맞춘 뒤 이탈 사유 기록
-        sync_products_incremental(24 * 14)
-        mark_homepage_exit(removed, now)
+        mark_homepage_exit(set(removed), now)
+
+    baseline = new_product_baseline_for_day(now.date())
+    opened = []
+    detection_note = ""
+
+    if _in_launch_window(now) and baseline:
+        opened, detection_note = detect_top_open_block(
+            baseline.get("ordered_product_nos") or [],
+            current_ordered,
+        )
+    elif _in_launch_window(now) and not baseline:
+        detection_note = "정오 전 v4 기준선 없음 · 오늘 자동등록 보류"
+    else:
+        detection_note = "출시 감시시간 외 · 순서 스냅샷만 저장"
 
     registered = 0
     skipped = []
-    if added:
-        rows = product_rows_for_discovery(added)
+
+    if opened:
+        rows = product_rows_for_discovery(set(opened))
         row_map = {
             str(r.get("product_no")): r
             for _, r in rows.iterrows()
         } if not rows.empty else {}
 
         launch_at = _canonical_launch_at(now)
-        for pno in sorted(added):
+        for pno in opened:
             row = row_map.get(str(pno))
             if row is None:
                 skipped.append((pno, "Cafe24 상품DB 미확인"))
                 continue
-
-            # 신상페이지에 실제 노출 + Cafe24 API에서 판매/진열중인 경우만 출시 확정
             if not _flag_true(row.get("display")) or not _flag_true(row.get("selling")):
                 skipped.append((pno, "Cafe24 판매/진열 상태 미확인"))
                 continue
@@ -166,7 +253,7 @@ def discover_new_products():
             result = auto_register_exploration(
                 pno,
                 detected_at=now,
-                source="신상페이지 신규등장 + Cafe24 API 확인",
+                source="신상 상단 신규오픈 + Cafe24 API 확인",
                 homepage_seen_at=now,
                 launch_at=launch_at,
             )
@@ -175,23 +262,32 @@ def discover_new_products():
             else:
                 skipped.append((pno, result.get("reason") or "기존 관찰"))
 
-    save_new_product_snapshot(now, NEW_PRODUCT_URL, current, added, removed)
+    save_new_product_snapshot(
+        now,
+        NEW_PRODUCT_URL,
+        current_ordered,
+        opened,
+        removed,
+    )
 
+    total_text = reported_total if reported_total is not None else len(current_ordered)
     msg = (
-        f"신상 현재 {len(current)}개 · 신규등장 {len(added)}개 · "
-        f"상품탐색 등록 {registered}개 · 페이지이탈 {len(removed)}개"
+        f"신상 현재 {len(current_ordered)}개(화면 TOTAL {total_text}) · "
+        f"오늘 상단 신규오픈 {len(opened)}개 · 상품탐색 등록 {registered}개 · "
+        f"페이지이탈 {len(removed)}개 · {detection_note}"
     )
     if skipped:
         msg += " · 미등록 " + ", ".join(f"{p}:{reason}" for p, reason in skipped[:10])
     log_sync("신상품 자동탐색", "성공", msg)
 
     return {
-        "baseline": False,
-        "current": len(current),
-        "added": len(added),
+        "current": len(current_ordered),
+        "reported_total": reported_total,
+        "opened": len(opened),
         "removed": len(removed),
         "registered": registered,
+        "detection_note": detection_note,
+        "opened_product_nos": opened,
+        "removed_product_nos": removed,
         "skipped": skipped,
-        "added_product_nos": sorted(added),
-        "removed_product_nos": sorted(removed),
     }

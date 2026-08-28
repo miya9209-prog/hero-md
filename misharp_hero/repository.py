@@ -1111,6 +1111,18 @@ def auto_register_exploration(
         return {"created": True, "launch_id": launch.id}
 
 
+def _decode_snapshot_payload(raw: str | None):
+    try:
+        payload = json.loads(raw or "[]")
+    except Exception:
+        payload = []
+    if isinstance(payload, dict):
+        ordered = [str(x) for x in payload.get("ordered", []) if str(x)]
+        return {"version": int(payload.get("version") or 4), "ordered": ordered, "set": set(ordered)}
+    ordered = [str(x) for x in (payload or []) if str(x)]
+    return {"version": 3, "ordered": ordered, "set": set(ordered)}
+
+
 def latest_new_product_snapshot():
     with session_scope() as s:
         row = s.scalar(
@@ -1120,20 +1132,70 @@ def latest_new_product_snapshot():
         )
         if row is None:
             return None
-        try:
-            product_nos = set(json.loads(row.product_nos_json or "[]"))
-        except Exception:
-            product_nos = set()
+        decoded = _decode_snapshot_payload(row.product_nos_json)
         return {
             "id": row.id,
             "captured_at": row.captured_at,
             "page_url": row.page_url,
-            "product_nos": {str(x) for x in product_nos},
+            "version": decoded["version"],
+            "ordered_product_nos": decoded["ordered"],
+            "product_nos": decoded["set"],
+            "product_count": int(row.product_count or len(decoded["ordered"])),
         }
 
 
+def new_product_baseline_for_day(day):
+    start_at = datetime.combine(day, datetime.min.time())
+    noon_at = datetime.combine(day, datetime.min.time()).replace(hour=12)
+    with session_scope() as s:
+        rows = s.scalars(
+            select(NewProductPageSnapshot)
+            .where(
+                NewProductPageSnapshot.captured_at >= start_at,
+                NewProductPageSnapshot.captured_at < noon_at,
+            )
+            .order_by(NewProductPageSnapshot.captured_at.desc())
+            .limit(20)
+        ).all()
+        for row in rows:
+            decoded = _decode_snapshot_payload(row.product_nos_json)
+            if decoded["version"] >= 4 and decoded["ordered"]:
+                return {
+                    "id": row.id,
+                    "captured_at": row.captured_at,
+                    "page_url": row.page_url,
+                    "version": decoded["version"],
+                    "ordered_product_nos": decoded["ordered"],
+                    "product_nos": decoded["set"],
+                }
+    return None
+
+
+def save_new_product_snapshot(captured_at: datetime, page_url: str, product_nos, added=None, removed=None):
+    ordered, seen = [], set()
+    for x in product_nos or []:
+        pno = str(x or "").strip()
+        if pno and pno not in seen:
+            ordered.append(pno)
+            seen.add(pno)
+    payload = {"version": 4, "ordered": ordered}
+    added_list = [str(x) for x in (added or []) if str(x)]
+    removed_list = [str(x) for x in (removed or []) if str(x)]
+    with session_scope() as s:
+        obj = NewProductPageSnapshot(
+            captured_at=captured_at,
+            page_url=page_url,
+            product_nos_json=json.dumps(payload, ensure_ascii=False),
+            product_count=len(ordered),
+            added_json=json.dumps(added_list, ensure_ascii=False),
+            removed_json=json.dumps(removed_list, ensure_ascii=False),
+        )
+        s.add(obj)
+        s.flush()
+        return obj.id
+
+
 def new_product_discovery_status():
-    """상품탐색 화면용 최신 신상페이지 스냅샷 요약."""
     with session_scope() as s:
         row = s.scalar(
             select(NewProductPageSnapshot)
@@ -1141,13 +1203,8 @@ def new_product_discovery_status():
             .limit(1)
         )
         if row is None:
-            return {
-                "current": 0,
-                "added": 0,
-                "removed": 0,
-                "captured_at": None,
-                "page_url": None,
-            }
+            return {"current": 0, "added": 0, "removed": 0, "captured_at": None, "page_url": None, "version": 0}
+        decoded = _decode_snapshot_payload(row.product_nos_json)
         try:
             added = json.loads(row.added_json or "[]")
         except Exception:
@@ -1162,28 +1219,40 @@ def new_product_discovery_status():
             "removed": len(removed),
             "captured_at": row.captured_at,
             "page_url": row.page_url,
+            "version": decoded["version"],
         }
 
 
-def save_new_product_snapshot(
-    captured_at: datetime,
-    page_url: str,
-    product_nos: set[str],
-    added: set[str] | None = None,
-    removed: set[str] | None = None,
-):
+def cleanup_legacy_discovery_active():
+    now = datetime.now()
+    cleaned = 0
     with session_scope() as s:
-        obj = NewProductPageSnapshot(
-            captured_at=captured_at,
-            page_url=page_url,
-            product_nos_json=json.dumps(sorted(str(x) for x in product_nos), ensure_ascii=False),
-            product_count=len(product_nos),
-            added_json=json.dumps(sorted(str(x) for x in (added or set())), ensure_ascii=False),
-            removed_json=json.dumps(sorted(str(x) for x in (removed or set())), ensure_ascii=False),
-        )
-        s.add(obj)
+        rows = s.scalars(
+            select(ProductMD).where(
+                ProductMD.auto_discovered == True,
+                ProductMD.hero_watch == True,
+            )
+        ).all()
+        for pm in rows:
+            source = str(pm.discovery_source or "")
+            if source.startswith("신상 상단 신규오픈"):
+                continue
+            launch = s.get(Launch, pm.launch_id) if pm.launch_id else None
+            if launch is None:
+                continue
+            if launch.close_48h_at and launch.close_48h_at <= now:
+                continue
+            if ("신상페이지" not in source) and ("541" not in source):
+                continue
+            pm.hero_watch = False
+            pm.updated_at = datetime.utcnow()
+            launch.review_manual = "관찰종료"
+            if not launch.other_note:
+                launch.other_note = "상품탐색 v4 전환 시 기존 자동탐색 오탐 정리"
+            cleaned += 1
         s.flush()
-        return obj.id
+    log_sync("신상품 자동탐색", "정리", f"v4 이전 현재 관찰중 자동탐색 {cleaned}개 관찰종료")
+    return cleaned
 
 
 def product_rows_for_discovery(product_nos: set[str]):
