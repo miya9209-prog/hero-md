@@ -30,6 +30,8 @@ from misharp_hero.repository import (
     dna_history_dataset,
     judgment_launches,
     new_product_discovery_status,
+    recent_discovery_recovery_candidates,
+    restore_discovery_launches,
     product_master_filter_values,
     product_master_page,
     save_judgment_workflow,
@@ -789,39 +791,89 @@ def page_data_settings():
     st.divider()
     st.subheader("2. 자동 신상품 탐색")
     st.caption(
-        "평일 정오 전 신상페이지 순서와 비교해 상단에 새롭게 오픈된 상품을 신상으로 판단하고, "
-        "Cafe24 API로 판매·진열 상태를 확인합니다. 기본 운영은 30분 주기로 자동 실행됩니다."
+        "Cafe24 API가 주 기준이며 홈페이지 크롤링은 실제 노출 교차확인용입니다. "
+        "기본 운영은 30분 주기로 탐색해 48시간 시작 오차를 줄입니다."
     )
     st.write(f"홈페이지: `{MISHARP_NEW_PRODUCT_URL or MISHARP_HOME_URL}`")
     if st.button("신상품 탐색 지금 실행", type="primary"):
         try:
-            with st.spinner("신상페이지 순서와 Cafe24 상태를 확인하는 중..."):
+            with st.spinner("신상품을 확인하고 상품 탐색에 자동 등록하는 중..."):
                 result = discover_new_products()
-                # 신규 등록이 있든 없든 현재 탐색상품의 Analytics는 함께 갱신
+                # 방금 자동등록된 상품의 첫 Analytics도 바로 수집
                 sync_launch_metrics()
-
-            current = int(result.get("current") or 0)
-            total = result.get("reported_total")
-            opened = int(result.get("opened") or 0)
-            registered = int(result.get("registered") or 0)
-            removed = int(result.get("removed") or 0)
-            note = str(result.get("detection_note") or "").strip()
-
-            total_text = f"{int(total):,}" if total is not None else "-"
             st.success(
-                f"신상 현재 {current:,}개 · 화면 TOTAL {total_text}개 · "
-                f"이번 확인 신규오픈 {opened:,}개 · 상품탐색 등록 {registered:,}개 · "
-                f"페이지이탈 {removed:,}개"
+                f"후보 {result['candidates']:,}개 · 신규등록 {result['registered']:,}개 · "
+                f"홈페이지 확인 {result['homepage_seen']:,}개"
             )
-            if note:
-                st.info(note)
-
-            skipped = result.get("skipped") or []
-            if skipped:
-                preview = " / ".join(f"{p}: {reason}" for p, reason in skipped[:10])
-                st.warning(f"자동등록 보류 {len(skipped):,}건 · {preview}")
+            if result.get("homepage_error"):
+                st.warning("홈페이지 크롤링은 실패했지만 Cafe24 API 자동탐색은 정상 처리됐습니다.")
         except Exception as e:
             st.error(str(e))
+
+    st.markdown("#### 최근 48시간 자동탐색 복구")
+    st.caption(
+        "상품탐색 v4 전환 과정에서 관찰종료된 최근 자동탐색 상품 중 실제 신상만 선택해 복구합니다. "
+        "기존 Launch와 이미 수집된 조회·장바구니·판매·매출 데이터는 그대로 유지됩니다."
+    )
+
+    recovery = recent_discovery_recovery_candidates(48)
+    if recovery.empty:
+        st.info("현재 복구 가능한 최근 48시간 자동탐색 상품이 없습니다.")
+    else:
+        recovery = recovery.copy()
+        recovery["선택"] = False
+        recovery["감지시각"] = recovery["discovered_at"].apply(
+            lambda x: _as_dt(x).strftime("%m-%d %H:%M") if _as_dt(x) else "-"
+        )
+        recovery["출시시각"] = recovery["launch_at"].apply(
+            lambda x: _as_dt(x).strftime("%m-%d %H:%M") if _as_dt(x) else "-"
+        )
+        recovery["매출"] = recovery["revenue"].apply(_money)
+
+        edited = st.data_editor(
+            recovery[
+                [
+                    "선택", "launch_id", "product_name", "감지시각", "출시시각",
+                    "views", "cart_count", "order_count", "qty", "매출", "discovery_source"
+                ]
+            ].rename(
+                columns={
+                    "launch_id": "관찰ID",
+                    "product_name": "상품명",
+                    "views": "조회수",
+                    "cart_count": "장바구니",
+                    "order_count": "판매건수",
+                    "qty": "판매수량",
+                    "discovery_source": "기존 탐색경로",
+                }
+            ),
+            use_container_width=True,
+            hide_index=True,
+            disabled=[
+                "관찰ID", "상품명", "감지시각", "출시시각",
+                "조회수", "장바구니", "판매건수", "판매수량", "매출", "기존 탐색경로",
+            ],
+            key="recovery_candidates_editor",
+        )
+
+        selected_ids = (
+            edited.loc[edited["선택"] == True, "관찰ID"].astype(int).tolist()
+            if "선택" in edited.columns else []
+        )
+
+        if st.button(
+            f"선택 상품 48시간 탐색 복구 ({len(selected_ids)}개)",
+            type="primary",
+            disabled=not selected_ids,
+            key="restore_discovery_launches_button",
+        ):
+            try:
+                restored = restore_discovery_launches(selected_ids)
+                sync_launch_metrics()
+                st.success(f"실제 신상 {restored:,}개를 기존 데이터 그대로 48시간 탐색에 복구했습니다.")
+                st.rerun()
+            except Exception as e:
+                st.error(str(e))
 
     st.divider()
     st.subheader("3. 연결 테스트")

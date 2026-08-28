@@ -1254,6 +1254,81 @@ def cleanup_legacy_discovery_active():
     log_sync("신상품 자동탐색", "정리", f"v4 이전 현재 관찰중 자동탐색 {cleaned}개 관찰종료")
     return cleaned
 
+def recent_discovery_recovery_candidates(hours: int = 48):
+    """v4 전환 정리로 관찰종료된 최근 자동탐색 상품 중 복구 가능한 후보."""
+    cutoff = datetime.utcnow() - timedelta(hours=int(hours))
+    return df(
+        """
+        SELECT
+            l.id AS launch_id,
+            l.product_no,
+            l.product_name,
+            l.launch_at,
+            l.close_48h_at,
+            l.review_manual,
+            l.other_note,
+            pm.discovered_at,
+            pm.discovery_source,
+            pm.homepage_seen_at,
+            pm.homepage_last_seen_at,
+            COALESCE(v2.views, m.views, 0) AS views,
+            COALESCE(v2.cart_count, 0) AS cart_count,
+            COALESCE(v2.order_count, m.order_count, 0) AS order_count,
+            COALESCE(v2.qty, m.qty, 0) AS qty,
+            COALESCE(v2.revenue, m.revenue, 0) AS revenue
+        FROM launches l
+        JOIN product_md pm ON pm.launch_id = l.id
+        LEFT JOIN hero_metrics_v2 v2 ON v2.launch_id = l.id
+        LEFT JOIN metrics_48h m ON m.launch_id = l.id
+        WHERE pm.auto_discovered = TRUE
+          AND COALESCE(pm.hero_watch, FALSE) = FALSE
+          AND l.review_manual = '관찰종료'
+          AND l.launch_at >= :cutoff
+          AND COALESCE(l.other_note, '') LIKE '%상품탐색 v4 전환%'
+        ORDER BY l.launch_at DESC, l.id DESC
+        """,
+        {"cutoff": cutoff},
+    )
+
+
+def restore_discovery_launches(launch_ids: list[int]):
+    """선택한 기존 Launch를 새로 만들지 않고 48시간 탐색으로 복구한다."""
+    ids = sorted({int(x) for x in (launch_ids or []) if str(x).strip()})
+    if not ids:
+        return 0
+
+    restored = 0
+    with session_scope() as s:
+        for launch_id in ids:
+            launch = s.get(Launch, launch_id)
+            if launch is None:
+                continue
+            pm = s.scalar(select(ProductMD).where(ProductMD.launch_id == launch.id))
+            if pm is None:
+                continue
+
+            # v4 전환 정리로 종료된 건만 복구
+            if launch.review_manual != "관찰종료":
+                continue
+            if "상품탐색 v4 전환" not in str(launch.other_note or ""):
+                continue
+
+            pm.hero_watch = True
+            pm.launch_at = launch.launch_at
+            pm.updated_at = datetime.utcnow()
+            launch.review_manual = None
+
+            note = str(launch.other_note or "")
+            note = note.replace("상품탐색 v4 전환 시 기존 자동탐색 오탐 정리", "").strip(" |")
+            launch.other_note = note or None
+
+            restored += 1
+
+        s.flush()
+
+    log_sync("신상품 자동탐색", "복구", f"최근 자동탐색 {restored}개 48시간 탐색 복구")
+    return restored
+
 
 def product_rows_for_discovery(product_nos: set[str]):
     return _df_in(
