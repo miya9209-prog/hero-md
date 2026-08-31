@@ -1001,15 +1001,46 @@ def count_products():
 
 
 def exploration_launches():
-    """현재 48시간 탐색창에 있는 상품만 반환한다."""
+    """현재 48시간 탐색창 상품을 홈페이지 신상 노출순서대로 반환한다.
+
+    동일 오픈시각 상품들이 DB 삽입순서로 뒤섞이지 않도록,
+    최신 신상페이지 순서 스냅샷의 product_no 위치를 최우선 정렬키로 사용한다.
+    """
     data = current_launches(only_observed=True)
     if data.empty:
         return data
+
     now = pd.Timestamp.now(tz="Asia/Seoul").tz_localize(None)
     launch_at = pd.to_datetime(data["launch_at"], errors="coerce")
     close_at = pd.to_datetime(data["close_48h_at"], errors="coerce")
     mask = launch_at.notna() & close_at.notna() & (launch_at <= now) & (close_at > now)
-    return data[mask].sort_values("launch_at", ascending=False).reset_index(drop=True)
+    data = data[mask].copy()
+    if data.empty:
+        return data
+
+    snapshot = latest_new_product_snapshot()
+    ordered = (snapshot or {}).get("ordered_product_nos") or []
+    rank_map = {str(product_no): idx for idx, product_no in enumerate(ordered)}
+
+    # 현재 신상페이지에 없는 예외 상품은 맨 뒤에 두되 최신 launch를 우선한다.
+    data["_homepage_rank"] = (
+        data["product_no"]
+        .astype(str)
+        .map(rank_map)
+        .fillna(10**9)
+        .astype(int)
+    )
+    data["_launch_sort"] = pd.to_datetime(data["launch_at"], errors="coerce")
+
+    return (
+        data.sort_values(
+            ["_homepage_rank", "_launch_sort"],
+            ascending=[True, False],
+            kind="stable",
+        )
+        .drop(columns=["_homepage_rank", "_launch_sort"])
+        .reset_index(drop=True)
+    )
 
 
 def judgment_launches(include_ended: bool = False):
