@@ -791,22 +791,36 @@ def page_data_settings():
     st.divider()
     st.subheader("2. 자동 신상품 탐색")
     st.caption(
-        "Cafe24 API가 주 기준이며 홈페이지 크롤링은 실제 노출 교차확인용입니다. "
-        "기본 운영은 30분 주기로 탐색해 48시간 시작 오차를 줄입니다."
+        "평일 정오 전 신상페이지 순서와 비교해 상단에 새롭게 오픈된 상품을 신상으로 판단하고, "
+        "Cafe24 API로 판매·진열 상태를 확인합니다. 기본 운영은 30분 주기로 자동 실행됩니다."
     )
     st.write(f"홈페이지: `{MISHARP_NEW_PRODUCT_URL or MISHARP_HOME_URL}`")
     if st.button("신상품 탐색 지금 실행", type="primary"):
         try:
-            with st.spinner("신상품을 확인하고 상품 탐색에 자동 등록하는 중..."):
+            with st.spinner("신상페이지 순서와 Cafe24 상태를 확인하는 중..."):
                 result = discover_new_products()
-                # 방금 자동등록된 상품의 첫 Analytics도 바로 수집
                 sync_launch_metrics()
+
+            current = int(result.get("current") or 0)
+            total = result.get("reported_total")
+            opened = int(result.get("opened") or 0)
+            registered = int(result.get("registered") or 0)
+            removed = int(result.get("removed") or 0)
+            note = str(result.get("detection_note") or "").strip()
+
+            total_text = f"{int(total):,}" if total is not None else "-"
             st.success(
-                f"후보 {result['candidates']:,}개 · 신규등록 {result['registered']:,}개 · "
-                f"홈페이지 확인 {result['homepage_seen']:,}개"
+                f"신상 현재 {current:,}개 · 화면 TOTAL {total_text}개 · "
+                f"이번 확인 신규오픈 {opened:,}개 · 상품탐색 등록 {registered:,}개 · "
+                f"페이지이탈 {removed:,}개"
             )
-            if result.get("homepage_error"):
-                st.warning("홈페이지 크롤링은 실패했지만 Cafe24 API 자동탐색은 정상 처리됐습니다.")
+            if note:
+                st.info(note)
+
+            skipped = result.get("skipped") or []
+            if skipped:
+                preview = " / ".join(f"{p}: {reason}" for p, reason in skipped[:10])
+                st.warning(f"자동등록 보류 {len(skipped):,}건 · {preview}")
         except Exception as e:
             st.error(str(e))
 
